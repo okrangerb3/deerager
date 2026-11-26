@@ -64,6 +64,16 @@ await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_a
   f = new FormData(); f.append('mode', 'jaw'); f.append('retake_of', sid); f.append('buck_name', 'Old Timer'); f.append('photos', jpg(), 'b.jpg'); r = await call('POST', '/scans', f, A);
   ok('free retake works', r.s === 200 && r.j.free_retake === true && r.j.retake_of === sid, r); ok('retake did not use a scan', (await call('GET', '/me', null, A)).j.scans_used === used);
   f = new FormData(); f.append('mode', 'jaw'); f.append('retake_of', sid); f.append('photos', jpg(), 'c.jpg'); r = await call('POST', '/scans', f, A); ok('second retake of same scan is a normal scan', r.s === 200 && !r.j.free_retake, r);  await db.query("delete from bucks where name='Old Timer'"); }
+// ---- rescan a deer: reuse earlier jaw photos and saved deer photos
+{ const dj = n => new Blob([Buffer.from('/9j/4AAQSkZJRg==', 'base64'), Buffer.from('rs' + n)], { type: 'image/jpeg' });
+  let f = new FormData(); f.append('mode', 'jaw'); f.append('buck_name', 'Rescan Ray'); f.append('photos', dj(1), 'a.jpg'); f.append('photos', dj(2), 'b.jpg'); f.append('deer_photos', dj(3), 'd.jpg'); r = await call('POST', '/scans', f, A);
+  ok('first scan for rescan test', r.s === 200 && r.j.buck_id, r); const bid = r.j.buck_id, sid = r.j.id;
+  f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); f.append('reuse_scan', sid); f.append('use_field', '1'); f.append('photos', dj(4), 'c.jpg'); r = await call('POST', '/scans', f, A);
+  ok('rescan with new + earlier + saved deer photos', r.s === 200 && r.j.id !== sid, r); const nid = r.j.id;
+  const n = (await db.query('select count(*)::int n from photos where scan_id=$1', [nid])).rows[0].n; ok('rescan keeps earlier jaw photos plus new one', n === 3, n);
+  f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); f.append('reuse_scan', nid); r = await call('POST', '/scans', f, A); ok('rescan with no new photos works', r.s === 200, r);
+  f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); r = await call('POST', '/scans', f, A); ok('no photos and no reuse rejected', r.s === 400, r);
+  await db.query("delete from bucks where name='Rescan Ray'"); }
 // ---- named deer + deer photos on jaw scans
 { const dj = n => new Blob([Buffer.from('/9j/4AAQSkZJRg==', 'base64'), Buffer.from('deer' + n)], { type: 'image/jpeg' });
   let f = new FormData(); f.append('mode', 'jaw'); f.append('photos', jpg(), 'a.jpg'); f.append('deer_photos', dj(1), 'd.jpg');

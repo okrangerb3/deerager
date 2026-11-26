@@ -287,7 +287,7 @@ const fail = (c: any, r: any, id: string) => c.json({ error: r.error, scan_id: i
 async function ingest(c: any, u: any, x: any = {}): Promise<any> {
   const f: any = await c.req.parseBody({ all: true }), mode = x.mode || f.mode, files = [].concat(f.photos || []);
   if (!canScan(u) && !(f.retake_of && ACTIVE.includes(u.sub_status))) return c.json({ error: 'subscription_required' }, 402); // a free retake is allowed even when trial scans are used up
-  if (!['jaw', 'deer', 'bc'].includes(mode) || !files.length || files.length > 8) return c.json({ error: 'invalid_input' }, 400);
+  if (!['jaw', 'deer', 'bc'].includes(mode) || (!files.length && !f.reuse_scan) || files.length > 8) return c.json({ error: 'invalid_input' }, 400);
   const dfiles = mode === 'jaw' ? ([] as any[]).concat(f.deer_photos || []) : []; // optional photos of the live deer, jaw scans only
   if (dfiles.length > 4 || files.length + dfiles.length > 12) return c.json({ error: 'invalid_input' }, 400);
   let buck: any = null; if (f.buck_id) { [buck] = await q('select id from bucks where id=$1 and user_id=$2', [f.buck_id, u.id]); if (!buck) return c.json({ error: 'not_found' }, 404); }
@@ -299,11 +299,18 @@ async function ingest(c: any, u: any, x: any = {}): Promise<any> {
     const buf = Buffer.from(await file.arrayBuffer()), h = sha(buf.toString('latin1')).slice(0, 24), key = `${u.id}/${h}.jpg`; // content-addressed: identical photos are stored once per user
     try { if (!(await s3.file(key).exists())) await s3.write(key, buf, { type: file.type }); stored.push({ key, bytes: buf.length, sha: h }); } catch (e: any) { console.error('s3 write failed', e.message); storageDown = true; } // keep going: the analysis still works from memory
     ; imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
+  if (f.reuse_scan && buck && mode === 'jaw') { // rescan: bring in the earlier jaw photos of this deer, newest first, up to 8 in all
+    const [old] = await q('select id from scans where id=$1 and user_id=$2 and buck_id=$3 and mode=$4', [f.reuse_scan, u.id, buck.id, mode]);
+    if (old) for (const p of await q('select s3_key,bytes,sha from photos where scan_id=$1 order by slot', [old.id])) { if (imgs.length >= 8) break; if (stored.some((x: any) => x.key === p.s3_key)) continue;
+      try { imgs.push({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') }); stored.push({ key: p.s3_key, bytes: p.bytes || 0, sha: p.sha || null }); } catch (e: any) { console.error('reuse read failed', e.message); } } }
+  if (!imgs.length) return c.json({ error: 'invalid_input' }, 400);
+  const reusedField = f.use_field === '1' && buck && mode === 'jaw' ? await q("select s3_key from buck_photos where buck_id=$1 and kind='field' order by created_at desc limit 4", [buck.id]) : [];
   for (const file of dfiles) { if (!file.type?.startsWith('image/')) return c.json({ error: 'bad_image' }, 400); if (file.size > 4.9e6) return c.json({ error: 'photo_too_large' }, 413);
     const buf = Buffer.from(await file.arrayBuffer()), key = `${u.id}/${sha(buf.toString('latin1')).slice(0, 24)}.jpg`;
     try { if (!(await s3.file(key).exists())) await s3.write(key, buf, { type: file.type }); dstored.push({ key, bytes: buf.length }); } catch (e: any) { console.error('s3 write failed', e.message); storageDown = true; }
     imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
-  if (dfiles.length) (imgs as any).note = `\n\nNOTE: the last ${dfiles.length} photo(s) show the live animal (not the jaw). Use them only as weak supporting evidence for body condition and size; the jaw tooth wear takes precedence, and do not raise confidence because of them.\n\n`;
+  let nField = 0; for (const p of reusedField as any[]) { if (nField + dfiles.length >= 4 || dstored.some((d: any) => d.key === p.s3_key)) continue; try { imgs.push({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') }); nField++; } catch (e: any) { console.error('field read failed', e.message); } }
+  if (dfiles.length + nField) (imgs as any).note = `\n\nNOTE: the last ${dfiles.length + nField} photo(s) show the live animal (not the jaw). Use them only as weak supporting evidence for body condition and size; the jaw tooth wear takes precedence, and do not raise confidence because of them.\n\n`;
   let retake: any = null; if (f.retake_of) { [retake] = await q('select id from scans where id=$1 and user_id=$2 and mode=$3 and retake_of is null and not exists(select 1 from scans r where r.retake_of=scans.id)', [f.retake_of, u.id, mode]); } // one free retake per scan, so a bad photo never costs a trial scan
   if (!canScan(u) && !retake) return c.json({ error: 'subscription_required' }, 402);
   const [s] = await q('insert into scans(user_id,buck_id,mode,flags,partner_id,ext,retake_of,counted) values($1,$2,$3,$4,$5,$6,$7,$8) returning *', [u.id, buck?.id || null, mode, { usable: false, pending: true }, x.partner_id || null, x.ext || null, retake?.id || null, !!retake]); // saved before analysis so photos are never orphaned
