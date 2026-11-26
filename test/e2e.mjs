@@ -267,5 +267,11 @@ r = await call('POST', `/admin/partners/${PID}/rotate`, null, AD); const PK2 = r
 r = await call('GET', '/v1/me', null, PK); ok('old key stops working', r.s === 401, r);
 await call('PUT', '/admin/partners/' + PID, { webhook_url: '', active: false }, AD); r = await call('GET', '/v1/me', null, PK2); ok('disabled partner rejected', r.s === 401, r);
 r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all starts', r.s === 200 && r.j.ok, r); for (let i = 0; i < 60; i++) { await new Promise(x => setTimeout(x, 500)); r = await call('GET', '/admin/rerun-all', null, AD); if (!r.j.running) break; } ok('admin re-run all finishes', r.j.running === false && r.j.finished, r.j);
+r = await call('GET', '/admin/costs', null, AD); ok('costs report loads with token counts', r.s === 200 && +r.j.totals.in_tok > 0 && r.j.by_model.length >= 1 && Array.isArray(r.j.users) && r.j.storage.bytes >= 0, r.j.totals);
+r = await call('PUT', '/admin/costs/settings', { prices: { 'mock-claude': { in: 3, out: 15 } }, storage_gb: 0.02, budget: 50 }, AD); ok('cost rates saved', r.s === 200, r);
+r = await call('POST', '/scans', scanForm('jaw'), AD); r = await call('GET', '/admin/costs', null, AD); ok('cost recorded once a rate is set', r.j.totals.tracked >= 1 && r.j.totals.cost > 0 && r.j.tracked.cost > 0, r.j.totals);
+r = await call('PUT', '/admin/costs/settings', { prices: { 'bad name!': { in: 1, out: 1 } } }, AD); ok('bad model name rejected', r.s === 400, r);
+r = await call('GET', '/admin/costs', null, AD); ok('saved rates and budget returned', r.j.prices['mock-claude'].in === 3 && r.j.storage_gb === 0.02 && r.j.budget === 50, r.j.prices['mock-claude']);
+r = await call('GET', '/admin/costs', null, A); ok('costs are admin only', r.s === 403 || r.s === 401, r.s);
 hs.close();
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED'); await db.end(); process.exit(fails ? 1 : 0);

@@ -60,3 +60,6 @@ Every report has a "Doesn't match what you know?" card: **I know his age** (save
 
 ## Age case (per deer)
 Scans on a named deer are pooled into one running estimate on the buck page. Rescans and retakes replace the scans they came from, a known age (hunter or lab) overrides the photos, and hunter feedback on earlier results ("too young", "too old") is passed to the AI on the next scan of that deer.
+
+## Cost tracking
+Every model run records input/output tokens (from the vendor's usage report) and a dollar cost using rates you can edit in Admin > Costs. That tab shows spend by model, month-to-date and projected spend against an optional budget, storage (GB and cost), cost per user, and a calculator that turns your real cost per scan and storage per scan into the plan price needed for a target margin (including Stripe's fee).
