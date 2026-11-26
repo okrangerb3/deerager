@@ -182,6 +182,19 @@ r = await call('GET', '/admin/models/overview', null, AD); ok('graded accuracy c
 const h = await fetch(BASE + '/'); ok('landing page served with security headers', h.status === 200 && h.headers.get('x-frame-options') === 'DENY' && h.headers.get('content-security-policy').includes("frame-ancestors 'none'") && h.headers.get('strict-transport-security') && (await h.text()).includes('Deer Ager'));
 ok('logo + share page + health', (await fetch(BASE + '/logo.svg')).headers.get('content-type').includes('svg') && (await fetch(BASE + '/s/abc')).status === 200 && (await (await fetch(BASE + '/health')).text()) === 'ok');
 r = await call('GET', '/me'); ok('API requires auth', r.s === 401, r);
+// --- plans admin
+r = await call('POST', '/admin/plans', { name: 'Pro Season', price_cents: 2999, interval: 'year' }, AD); ok('admin adds a plan', r.s === 200 && /^p_/.test(r.j.id), r); const NP = r.j.id;
+r = await call('POST', '/admin/plans', { name: 'Bad', price_cents: 5 }, AD); ok('plan price validated', r.s === 400, r);
+r = await call('GET', '/plans'); ok('new plan is public and sorted by monthly cost', r.j.some(x => x.id === NP) && r.j.filter(x => x.interval !== 'none').every((x, i, a) => !i || (a[i - 1].interval === 'year' ? a[i - 1].price_cents / 12 : a[i - 1].price_cents) <= (x.interval === 'year' ? x.price_cents / 12 : x.price_cents)), r.j);
+r = await call('PUT', '/admin/plans/' + NP, { active: false }, AD); r = await call('GET', '/plans'); ok('taking a plan off sale hides it', !r.j.some(x => x.id === NP));
+r = await call('PUT', '/admin/plans/trial', { active: false }, AD); ok('trial plan cannot be turned off', r.s === 400, r);
+r = await call('DELETE', '/admin/plans/trial', null, AD); ok('trial plan cannot be deleted', r.s === 400, r);
+r = await call('DELETE', '/admin/plans/' + NP, null, A); ok('non-admin cannot delete plans', r.s === 403, r);
+r = await call('DELETE', '/admin/plans/' + NP, null, AD); ok('plan with no subscribers is deleted', r.j.deleted === true, r); r = await call('GET', '/admin/plans', null, AD); ok('deleted plan gone from admin list', !r.j.some(x => x.id === NP));
+r = await call('POST', '/admin/plans', { name: 'Temp', price_cents: 1500, interval: 'month' }, AD); const TP = r.j.id; await db.query("update users set plan_id=$1 where email=$2", [TP, 'a@test.com']);
+r = await call('DELETE', '/admin/plans/' + TP, null, AD); ok('plan with subscribers is retired, not deleted', r.j.retired === true && r.j.users === 1, r); await db.query("update users set plan_id='trial' where plan_id=$1", [TP]);
+r = await call('GET', '/admin/plans', null, AD); const paid = r.j.filter(x => x.active && x.interval !== 'none'); for (const x of paid.slice(1)) await call('PUT', '/admin/plans/' + x.id, { active: false }, AD);
+r = await call('DELETE', '/admin/plans/' + paid[0].id, null, AD); ok('last paid plan cannot be removed', r.s === 400 && r.j.error === 'last_plan', r); for (const x of paid.slice(1)) await call('PUT', '/admin/plans/' + x.id, { active: true }, AD);
 // --- partner API
 import http from 'http';
 const hooks = []; const hs = http.createServer((rq, rs) => { let b = ''; rq.on('data', d => b += d); rq.on('end', () => { hooks.push({ h: rq.headers['deerager-signature'], b }); rs.end('ok'); }); }).listen(9911);
