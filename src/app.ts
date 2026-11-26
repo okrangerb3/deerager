@@ -52,7 +52,7 @@ const classify = (o: any) => {
   if (o.premolar3_temporary === true) return { cls: 'Fawn', range: 'Under 1 year', rule: 'The 3rd premolar is still a baby (temporary) tooth, which only fawns have, so this is a fawn.' };
   const w = Number(o.molar_wear); if (o.molar_wear == null || !Number.isFinite(w)) return { cls: null, range: null, rule: null };
   if (w <= 0) return { cls: 'Yearling', range: 'About 1.5 years', rule: 'Permanent teeth with almost no molar wear (grade 0, just erupted) means a yearling, about 1.5 years.' };
-  if (w === 1) return { cls: '2.5', range: 'About 2.5 years', rule: 'Light molar wear (grade 1) means about 2.5 years.' };
+  if (w === 1) return { cls: '2.5', range: 'About 2.5 years', rule: 'Light molar wear (grade 1) means about 2.5 years, though light wear is easy to misjudge, so he could be older.' };
   if (w === 2) return { cls: 'Middle', range: 'About 3.5-5.5 years', rule: 'Moderate molar wear (grade 2, dentine wider than enamel) means middle-aged, about 3.5 to 5.5 years.' };
   return { cls: 'Old', range: '6+ years (wear aging is unreliable here)', rule: 'Heavy molar wear (grade 3) means an older deer, 6+ years. Wear is the least reliable way to age deer at this stage.' };
 };
@@ -63,7 +63,7 @@ const bc = ({ l, r, spread = 0, abnormal = 0 }: any) => {
   return { gross, deductions, net: gross - deductions, estimate: true };
 };
 const PROMPT: any = {
-  jaw: 'You assist a hunter aging a white-tailed deer from lower-jaw photos using tooth replacement and wear (Severinghaus). Wear past 2.5 years is unreliable even for experts: be conservative.',
+  jaw: 'You assist a hunter aging a white-tailed deer from lower-jaw photos using tooth replacement and wear (Severinghaus). Wear past 2.5 years is unreliable even for experts: be conservative. Grade molar wear on the FIRST and SECOND molars (they wear first), on every visible cusp, not the back molar. Known bias: graders under-call wear and under-age older deer. Give grade 1 only when enamel is clearly wider than dentine on all cusps and the cusps are sharp and tall; if torn between 1 and 2, choose 2; if torn between 2 and 3, choose 3. A big rack or body does not change the jaw grade.',
   deer: 'You assist a hunter estimating the age class of a whole white-tailed deer from body photos. This is unreliable: cap confidence at 60.',
   bc: 'You estimate Boone and Crockett typical whitetail net score from antler photos using a visible scale reference. If none, usable=false.'
 };
@@ -92,7 +92,7 @@ const conf = (o: any, mode: string) => confDetail(o, mode).final;
 // Age probability: the model's own distribution blended with a population prior. The less we trust the photos, the more the prior (and so honest uncertainty) shows.
 const AGES = ['0.5', '1.5', '2.5', '3.5', '4.5', '5.5', '6.5+'];
 const PRIOR: any = { '0.5': 0.02, '1.5': 0.18, '2.5': 0.22, '3.5': 0.22, '4.5': 0.17, '5.5': 0.12, '6.5+': 0.07 };
-const FIXED: any = { Fawn: { '0.5': 1 }, Yearling: { '1.5': 0.88, '2.5': 0.12 }, '2.5': { '1.5': 0.1, '2.5': 0.72, '3.5': 0.18 } };
+const FIXED: any = { Fawn: { '0.5': 1 }, Yearling: { '1.5': 0.88, '2.5': 0.12 }, '2.5': { '1.5': 0.04, '2.5': 0.5, '3.5': 0.32, '4.5': 0.14 } }; // light wear is often misjudged on older deer, so a grade-1 call keeps real weight on 3.5+
 const ageDist = (o: any, mode: string, cls: string | null, cf: number) => {
   if (!o || o.usable === false || mode === 'bc') return null;
   let m: any = FIXED[cls as string] || null;
