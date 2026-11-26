@@ -55,6 +55,15 @@ r = await call('POST', '/scans', scanForm('bc'), A); ok('unusable photos flagged
 r = await call('GET', '/me', null, A); ok('unusable scan did not burn a trial scan', r.j.scans_used === 1, r.j.scans_used);
 await call('POST', '/scans', scanForm('jaw', bid), A); await call('POST', '/scans', scanForm('jaw', bid), A); r = await call('POST', '/scans', scanForm('jaw', bid), A); ok('trial scan limit enforced', r.s === 402 && r.j.error === 'subscription_required', r);
 await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_annual')); r = await call('GET', '/me', null, A); ok('trial converts to active, scanning resumes', r.j.can_scan === true && r.j.sub_status === 'active', r.j);
+// ---- hunter says the result is wrong: known age + free retake
+{ let f = new FormData(); f.append('mode', 'jaw'); f.append('buck_name', 'Old Timer'); f.append('photos', jpg(), 'a.jpg'); r = await call('POST', '/scans', f, A);
+  ok('scan for mismatch flow', r.s === 200 && r.j.id, r); const sid = r.j.id;
+  r = await call('PATCH', '/scans/' + sid, { user_age: '6.5+' }, A); ok('known age saved', r.s === 200, r); r = await call('GET', '/scans/' + sid, null, A); ok('known age returned on report', r.j.user_age === '6.5+', r.j.user_age);
+  r = await call('PATCH', '/scans/' + sid, { user_age: '9' }, A); ok('bad known age rejected', r.s === 400, r);
+  const used = (await call('GET', '/me', null, A)).j.scans_used;
+  f = new FormData(); f.append('mode', 'jaw'); f.append('retake_of', sid); f.append('buck_name', 'Old Timer'); f.append('photos', jpg(), 'b.jpg'); r = await call('POST', '/scans', f, A);
+  ok('free retake works', r.s === 200 && r.j.free_retake === true && r.j.retake_of === sid, r); ok('retake did not use a scan', (await call('GET', '/me', null, A)).j.scans_used === used);
+  f = new FormData(); f.append('mode', 'jaw'); f.append('retake_of', sid); f.append('photos', jpg(), 'c.jpg'); r = await call('POST', '/scans', f, A); ok('second retake of same scan is a normal scan', r.s === 200 && !r.j.free_retake, r);  await db.query("delete from bucks where name='Old Timer'"); }
 // ---- named deer + deer photos on jaw scans
 { const dj = n => new Blob([Buffer.from('/9j/4AAQSkZJRg==', 'base64'), Buffer.from('deer' + n)], { type: 'image/jpeg' });
   let f = new FormData(); f.append('mode', 'jaw'); f.append('photos', jpg(), 'a.jpg'); f.append('deer_photos', dj(1), 'd.jpg');

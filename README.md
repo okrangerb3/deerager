@@ -54,3 +54,6 @@ Card data never touches this server: payment uses Stripe-hosted Checkout and the
 
 ## Not yet built
 **Hunting club tier** (club accounts, members whose deer follow them between clubs, a copy of each deer record kept by the club they left, an end-of-season view with photos and data, and an API for the separate club-management software). Rate limiting is in-memory (fine for one instance), PNG PWA icons, and the accuracy calibration of `classify()` in `src/app.ts` (thresholds are a first guess until benchmarked against lab-aged jaws).
+
+## When a result doesn't match what you know
+Every report has a "Doesn't match what you know?" card: **I know his age** (saved on the scan and used to check accuracy), **Retake photos** (one free retake per scan, with tips based on what the analysis flagged; it does not use a trial scan), or **Re-run the same photos**. Jaw scans can also include photos of the live deer, tied to a named deer in the Bucks log.
