@@ -197,25 +197,35 @@ const buckVals = (b: any) => [String(b.name || '').trim().slice(0, 80), b.hunted
 app.get('/api/bucks', auth, gate, async c => c.json(await q("select b.*,(select count(*)::int from scans s where s.buck_id=b.id) scans,(select class from scans s where s.buck_id=b.id and s.mode='jaw' order by created_at desc limit 1) age_class,(select count(*)::int from buck_photos p where p.buck_id=b.id)+(select count(*)::int from photos p join scans s on s.id=p.scan_id where s.buck_id=b.id) photo_count from bucks b where user_id=$1 order by coalesce(hunted_on,created_at::date) desc,created_at desc", [c.get('user').id])));
 app.post('/api/bucks', auth, async c => { const v = buckVals(await c.req.json()); if (!v[0]) return c.json({ error: 'name_required' }, 400);
   const [b] = await q(`insert into bucks(user_id,${BUCK.join(',')}) values(${['$1', ...BUCK.map((_, i) => '$' + (i + 2))].join(',')}) returning *`, [c.get('user').id, ...v]); return c.json(b); });
-// Age case: every scan on a named deer is pooled into one running estimate. Rescans and retakes replace the scans they came from, and a known age overrides the photos.
+// Age case: every scan on a named deer is pooled into one running estimate from the PHOTOS only. Rescans and retakes replace the scans they came from.
+// The hunter's own estimate is shown beside it but never changes it, and is never passed to the AI.
 async function buckCase(buckId: string) {
-  const rows = await q("select id,mode,confidence,created_at,observations->'dist' dist,retake_of,reuse_of,user_age,truth_age,approval from scans where buck_id=$1 and mode in ('jaw','deer') order by created_at", [buckId]);
+  const rows = await q("select id,mode,confidence,created_at,observations,observations->'dist' dist,retake_of,reuse_of,user_age,approval from scans where buck_id=$1 and mode in ('jaw','deer') order by created_at", [buckId]);
   const sup = new Set(rows.flatMap((r: any) => [r.retake_of, r.reuse_of]).filter(Boolean)), srcs: any[] = [];
-  const known = [...rows].reverse().map((r: any) => r.truth_age || r.user_age).find(Boolean) || null;
-  for (const r of rows as any[]) { if (!r.dist?.probs) continue; const w = Math.max(0.1, (r.confidence || 50) / 100) * (r.mode === 'jaw' ? 1 : 0.35); srcs.push({ id: r.id, mode: r.mode, created_at: r.created_at, best: r.dist.best, conf: r.confidence, weight: Math.round(w * 100) / 100, superseded: sup.has(r.id), approval: r.approval, probs: r.dist.probs }); }
+  const hunter = [...rows].reverse().map((r: any) => r.user_age).find(Boolean) || null;
+  for (const r of rows as any[]) { if (!r.dist?.probs) continue; const w = Math.max(0.1, (r.confidence || 50) / 100) * (r.mode === 'jaw' ? 1 : 0.35); srcs.push({ id: r.id, mode: r.mode, created_at: r.created_at, best: r.dist.best, conf: r.confidence, weight: Math.round(w * 100) / 100, superseded: sup.has(r.id), approval: r.approval, probs: r.dist.probs, obs: r.observations }); }
   const used = srcs.filter(x => !x.superseded);
-  if (!used.length && !known) return null;
-  let dist: any = null;
-  if (known) { const pr: any = {}; for (const a of AGES) pr[a] = a === known ? 94 : 1; dist = { probs: pr, best: known, lo: known, hi: known, method: 'known' }; }
-  else { const tw = used.reduce((t, x) => t + x.weight, 0), k = tw > 2 ? 2 / tw : 1, lg: any = {}; let mx = -1e9;
-    for (const a of AGES) { lg[a] = used.reduce((t, x) => t + x.weight * k * Math.log(Math.max((+x.probs[a] || 0) / 100, 0.005)), 0); mx = Math.max(mx, lg[a]); }
-    const ex: any = {}; let tot = 0; for (const a of AGES) { ex[a] = Math.exp(lg[a] - mx); tot += ex[a]; }
-    const pr: any = {}; for (const a of AGES) pr[a] = Math.round((ex[a] / tot) * 1000) / 10;
-    const best = AGES.reduce((x, y) => (pr[y] > pr[x] ? y : x)); let cum = 0, lo = AGES[0], hi = AGES[AGES.length - 1], got = false;
-    for (const a of AGES) { cum += pr[a]; if (!got && cum >= 10) { lo = a; got = true; } if (cum >= 90) { hi = a; break; } }
-    dist = { probs: pr, best, lo, hi, method: 'case' }; }
-  return { dist, known, n_used: used.length, n_total: srcs.length, sources: srcs.map(({ probs, ...x }) => x) };
+  if (!used.length) return hunter ? { dist: null, hunter, n_used: 0, n_total: 0, sources: [], why: [] } : null;
+  const tw = used.reduce((t, x) => t + x.weight, 0), k = tw > 2 ? 2 / tw : 1, lg: any = {}; let mx = -1e9;
+  for (const a of AGES) { lg[a] = used.reduce((t, x) => t + x.weight * k * Math.log(Math.max((+x.probs[a] || 0) / 100, 0.005)), 0); mx = Math.max(mx, lg[a]); }
+  const ex: any = {}; let tot = 0; for (const a of AGES) { ex[a] = Math.exp(lg[a] - mx); tot += ex[a]; }
+  const pr: any = {}; for (const a of AGES) pr[a] = Math.round((ex[a] / tot) * 1000) / 10;
+  const best = AGES.reduce((x, y) => (pr[y] > pr[x] ? y : x)); let cum = 0, lo = AGES[0], hi = AGES[AGES.length - 1], got = false;
+  for (const a of AGES) { cum += pr[a]; if (!got && cum >= 10) { lo = a; got = true; } if (cum >= 90) { hi = a; break; } }
+  const dist = { probs: pr, best, lo, hi, method: 'case' };
+  // Why we scored it this way: plain-language reasons from what the photos showed
+  const why: string[] = [], WEAR = ['unworn, just erupted', 'light', 'moderate (dentine about as wide as enamel)', 'heavy'];
+  why.push(`${used.length === 1 ? 'One scan' : used.length + ' scans'} point to ${best} years (${pr[best]}%), most likely between ${lo} and ${hi}. ${used.length > 1 ? 'Independent scans agreeing makes this firmer.' : 'More angles or a rescan would firm it up.'}`);
+  for (const x of [...used].reverse().slice(0, 3)) { const o = x.obs || {}, d = fdate(x.created_at);
+    if (x.mode === 'jaw' && o.molar_wear != null) why.push(`${d}: molar wear graded ${o.molar_wear} (${WEAR[+o.molar_wear] || '?'}).${o.premolar3_temporary === true ? ' The 3rd premolar is still a baby tooth, which means a fawn.' : ''}`);
+    const r = String(o.reasoning || '').split(/(?<=[.!?])\s+/).slice(0, 2).join(' '); if (r) why.push(`${d}: ${r}`);
+    for (const f of (o.features || []).slice(0, 3)) if (f?.feature && f.observation) why.push(`${f.feature}: ${f.observation}${f.points_to ? ' → ' + f.points_to : ''}`); }
+  if (+String(best).replace('+', '') >= 3.5) why.push('Tooth wear gets less reliable past 3.5 years, even for experts, so older deer are often aged too young from teeth alone. A lab cementum test is the gold standard.');
+  const lastObs = [...used].reverse().map(x => x.obs?.would_change_answer).find((w: any) => Array.isArray(w) && w.length); if (lastObs) why.push('What would sharpen this: ' + lastObs.slice(0, 2).join('; '));
+  if (hunter && hunter !== best) why.push(`You estimate ${hunter} years. The photos point to ${best}. Your estimate is shown but does not change this result. To settle it, add a clear close-up of the first molar and a straight-down shot of the chewing surface.`);
+  return { dist, hunter, n_used: used.length, n_total: srcs.length, sources: srcs.map(({ probs, obs, ...x }) => x), why };
 }
+const fdate = (d: any) => new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 app.get('/api/bucks/:id', auth, gate, async c => { const [b] = await q('select * from bucks where id=$1 and user_id=$2', [c.req.param('id'), c.get('user').id]); if (!b) return c.json({ error: 'not_found' }, 404);
   const sl = await q('select id,mode,class,range,confidence,flags,created_at,observations->\'dist\' dist,(select s3_key from photos where scan_id=scans.id order by slot limit 1) thumb from scans where buck_id=$1 order by created_at desc', [b.id]);
   const ph = await q('select id,s3_key,kind,caption from buck_photos where buck_id=$1 order by created_at', [b.id]);
@@ -333,9 +343,6 @@ async function ingest(c: any, u: any, x: any = {}): Promise<any> {
   if (dfiles.length + nField) (imgs as any).note = `\n\nNOTE: the last ${dfiles.length + nField} photo(s) show the live animal (not the jaw). Use them only as weak supporting evidence for body condition and size; the jaw tooth wear takes precedence, and do not raise confidence because of them.\n\n`;
   let retake: any = null; if (f.retake_of) { [retake] = await q('select id from scans where id=$1 and user_id=$2 and mode=$3 and retake_of is null and not exists(select 1 from scans r where r.retake_of=scans.id)', [f.retake_of, u.id, mode]); } // one free retake per scan, so a bad photo never costs a trial scan
   if (!canScan(u) && !retake) return c.json({ error: 'subscription_required' }, 402);
-  if (buck && mode !== 'bc') { const hist = await q("select mode,observations->'dist'->>'best' best,approval,user_age,truth_age,created_at from scans where buck_id=$1 and (approval is not null or user_age is not null or truth_age is not null) order by created_at desc limit 6", [buck.id]);
-    const lines = hist.map((h: any) => h.truth_age || h.user_age ? `The hunter states this deer's age is ${h.truth_age || h.user_age} years.` : h.approval === 'too_young' ? `An earlier estimate of ${h.best} years was reported by the hunter as too young.` : h.approval === 'too_old' ? `An earlier estimate of ${h.best} years was reported by the hunter as too old.` : h.approval === 'right' ? `An earlier estimate of ${h.best} years was confirmed by the hunter.` : '').filter(Boolean);
-    if (lines.length) (imgs as any).note = ((imgs as any).note || '') + `\n\nCONTEXT from earlier work on this same deer (use it to look harder at the wear, but still report what the photos show): ${[...new Set(lines)].join(' ')}\n\n`; }
   const [s] = await q('insert into scans(user_id,buck_id,mode,flags,partner_id,ext,retake_of,counted,reuse_of) values($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *', [u.id, buck?.id || null, mode, { usable: false, pending: true }, x.partner_id || null, x.ext || null, retake?.id || null, !!retake, reuseOf]); // saved before analysis so photos are never orphaned
   for (const [i, p] of stored.entries()) await q('insert into photos(scan_id,s3_key,slot,bytes,sha) values($1,$2,$3,$4,$5)', [s.id, p.key, i, p.bytes, p.sha]);
   for (const d of dstored) if (!(await q('select 1 from buck_photos where buck_id=$1 and s3_key=$2', [buck.id, d.key])).length) await q("insert into buck_photos(buck_id,s3_key,kind,caption,bytes) values($1,$2,'field','From jaw scan',$3)", [buck.id, d.key, d.bytes]);

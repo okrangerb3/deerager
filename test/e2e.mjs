@@ -58,11 +58,11 @@ await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_a
 // ---- hunter says the result is wrong: known age + free retake
 { let f = new FormData(); f.append('mode', 'jaw'); f.append('buck_name', 'Old Timer'); f.append('photos', jpg(), 'a.jpg'); r = await call('POST', '/scans', f, A);
   ok('scan for mismatch flow', r.s === 200 && r.j.id, r); const sid = r.j.id;
-  r = await call('PATCH', '/scans/' + sid, { user_age: '6.5+' }, A); ok('known age saved', r.s === 200, r); r = await call('GET', '/scans/' + sid, null, A); ok('known age returned on report', r.j.user_age === '6.5+', r.j.user_age);
+  r = await call('PATCH', '/scans/' + sid, { user_age: '6.5+' }, A); ok('hunter estimate saved', r.s === 200, r); r = await call('GET', '/scans/' + sid, null, A); ok('hunter estimate returned on report', r.j.user_age === '6.5+', r.j.user_age);
   r = await call('PATCH', '/scans/' + sid, { approval: 'too_young' }, A); ok('approval saved', r.s === 200, r); r = await call('GET', '/scans/' + sid, null, A); ok('approval returned', r.j.approval === 'too_young', r.j.approval);
   r = await call('PATCH', '/scans/' + sid, { approval: 'maybe' }, A); ok('bad approval rejected', r.s === 400, r);
   r = await call('GET', '/admin/models/overview', null, AD); ok('admin sees approval stats', r.s === 200 && r.j.approval.total.answered >= 1 && r.j.approval.rejected.length >= 1, r.j.approval);
-  r = await call('PATCH', '/scans/' + sid, { user_age: '9' }, A); ok('bad known age rejected', r.s === 400, r);
+  r = await call('PATCH', '/scans/' + sid, { user_age: '9' }, A); ok('bad hunter estimate rejected', r.s === 400, r);
   const used = (await call('GET', '/me', null, A)).j.scans_used;
   f = new FormData(); f.append('mode', 'jaw'); f.append('retake_of', sid); f.append('buck_name', 'Old Timer'); f.append('photos', jpg(), 'b.jpg'); r = await call('POST', '/scans', f, A);
   ok('free retake works', r.s === 200 && r.j.free_retake === true && r.j.retake_of === sid, r); ok('retake did not use a scan', (await call('GET', '/me', null, A)).j.scans_used === used);
@@ -77,7 +77,7 @@ await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_a
   f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); f.append('reuse_scan', nid); r = await call('POST', '/scans', f, A); ok('rescan with no new photos works', r.s === 200, r);
   r = await call('GET', '/bucks/' + bid, null, A); const ac = r.j.age_case; ok('age case built from scans', ac && ac.dist?.best && ac.n_total >= 3 && ac.n_used >= 1 && ac.n_used < ac.n_total, ac);
   ok('rescan source marked replaced', ac.sources.some(x => x.superseded), ac.sources);
-  await call('PATCH', '/scans/' + nid, { user_age: '5.5' }, A); r = await call('GET', '/bucks/' + bid, null, A); ok('known age overrides the case', r.j.age_case.known === '5.5' && r.j.age_case.dist.best === '5.5', r.j.age_case);
+  await call('PATCH', '/scans/' + nid, { user_age: '5.5' }, A); r = await call('GET', '/bucks/' + bid, null, A); ok('hunter estimate shown but does not change the case', r.j.age_case.hunter === '5.5' && r.j.age_case.dist.method === 'case' && r.j.age_case.why.length >= 1, r.j.age_case);
   f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); r = await call('POST', '/scans', f, A); ok('no photos and no reuse rejected', r.s === 400, r);
   await db.query("delete from bucks where name='Rescan Ray'"); }
 // ---- named deer + deer photos on jaw scans
