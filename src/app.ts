@@ -213,15 +213,15 @@ app.post('/api/scans', auth, async c => {
   const f: any = await c.req.parseBody({ all: true }), mode = f.mode, files = [].concat(f.photos || []);
   if (!['jaw', 'deer', 'bc'].includes(mode) || !files.length || files.length > 8) return c.json({ error: 'invalid_input' }, 400);
   let buck = null; if (f.buck_id) { [buck] = await q('select id from bucks where id=$1 and user_id=$2', [f.buck_id, u.id]); if (!buck) return c.json({ error: 'not_found' }, 404); }
-  const imgs: any[] = [], stored: any[] = [];
+  const imgs: any[] = [], stored: any[] = []; let storageDown = false;
   for (const file of files as any[]) { if (!file.type?.startsWith('image/')) return c.json({ error: 'bad_image' }, 400); if (file.size > 4.9e6) return c.json({ error: 'photo_too_large' }, 413); // AI vision limit is about 5 MB per photo
     const buf = Buffer.from(await file.arrayBuffer()), h = sha(buf.toString('latin1')).slice(0, 24), key = `${u.id}/${h}.jpg`; // content-addressed: identical photos are stored once per user
-    try { if (!(await s3.file(key).exists())) await s3.write(key, buf, { type: file.type }); } catch (e: any) { console.error('s3 write failed', e.message); return c.json({ error: 'storage_failed' }, 502); }
-    stored.push({ key, bytes: buf.length, sha: h }); imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
+    try { if (!(await s3.file(key).exists())) await s3.write(key, buf, { type: file.type }); stored.push({ key, bytes: buf.length, sha: h }); } catch (e: any) { console.error('s3 write failed', e.message); storageDown = true; } // keep going: the analysis still works from memory
+    ; imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
   const [s] = await q('insert into scans(user_id,buck_id,mode,flags) values($1,$2,$3,$4) returning *', [u.id, buck?.id || null, mode, { usable: false, pending: true }]); // saved before analysis so photos are never orphaned
   for (const [i, p] of stored.entries()) await q('insert into photos(scan_id,s3_key,slot,bytes,sha) values($1,$2,$3,$4,$5)', [s.id, p.key, i, p.bytes, p.sha]);
   const r: any = await runAnalysis(s, u, imgs); if (r.error) return fail(c, r, s.id);
-  return c.json({ ...(await report(r.scan)), buck_id: buck?.id || null, needs_more_photos: r.needs_more });
+  return c.json({ ...(await report(r.scan)), buck_id: buck?.id || null, needs_more_photos: r.needs_more, storage_down: storageDown });
 });
 app.post('/api/scans/:id/reanalyze', auth, gate, async c => { const u = c.get('user'), s = await mine(c); if (!s) return c.json({ error: 'not_found' }, 404); if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);
   const ph = await q('select s3_key from photos where scan_id=$1 order by slot', [s.id]); if (!ph.length) return c.json({ error: 'no_photos' }, 400);
