@@ -71,9 +71,9 @@ const FORMAT = ' Reply with ONLY one JSON object with these fields: {"usable":bo
 const post = async (url: string, headers: any, body: any) => { const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), signal: AbortSignal.timeout(120000) }); if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`); return r.json(); };
 const parse = (t: string) => { const m = t.match(/\{[\s\S]*\}/); return JSON.parse(m ? m[0] : t); };
 const PROV: any = {
-  claude: async (imgs: any[], mode: string) => (await post('https://api.anthropic.com/v1/messages', { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, { model: env.MODEL_CLAUDE, max_tokens: 6000, messages: [{ role: 'user', content: [...imgs.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.b64 } })), { type: 'text', text: PROMPT[mode] + FORMAT }] }] })).content.map((c: any) => c.text || '').join(''),
-  openai: async (imgs: any[], mode: string) => (await post('https://api.openai.com/v1/chat/completions', { authorization: 'Bearer ' + env.OPENAI_API_KEY }, { model: env.MODEL_OPENAI, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: [...imgs.map(i => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.b64}` } })), { type: 'text', text: PROMPT[mode] + FORMAT }] }] })).choices[0].message.content,
-  gemini: async (imgs: any[], mode: string) => (await post(`https://generativelanguage.googleapis.com/v1beta/models/${env.MODEL_GEMINI}:generateContent?key=${env.GEMINI_API_KEY}`, {}, { contents: [{ parts: [...imgs.map(i => ({ inline_data: { mime_type: i.mime, data: i.b64 } })), { text: PROMPT[mode] + FORMAT }] }], generationConfig: { responseMimeType: 'application/json' } })).candidates[0].content.parts.map((p: any) => p.text || '').join('')
+  claude: async (imgs: any[], mode: string) => (await post('https://api.anthropic.com/v1/messages', { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, { model: env.MODEL_CLAUDE, max_tokens: 6000, messages: [{ role: 'user', content: [...imgs.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.b64 } })), { type: 'text', text: PROMPT[mode] + ((imgs as any).note || '') + FORMAT }] }] })).content.map((c: any) => c.text || '').join(''),
+  openai: async (imgs: any[], mode: string) => (await post('https://api.openai.com/v1/chat/completions', { authorization: 'Bearer ' + env.OPENAI_API_KEY }, { model: env.MODEL_OPENAI, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: [...imgs.map(i => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.b64}` } })), { type: 'text', text: PROMPT[mode] + ((imgs as any).note || '') + FORMAT }] }] })).choices[0].message.content,
+  gemini: async (imgs: any[], mode: string) => (await post(`https://generativelanguage.googleapis.com/v1beta/models/${env.MODEL_GEMINI}:generateContent?key=${env.GEMINI_API_KEY}`, {}, { contents: [{ parts: [...imgs.map(i => ({ inline_data: { mime_type: i.mime, data: i.b64 } })), { text: PROMPT[mode] + ((imgs as any).note || '') + FORMAT }] }], generationConfig: { responseMimeType: 'application/json' } })).candidates[0].content.parts.map((p: any) => p.text || '').join('')
 };
 const KEYS: any = { claude: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', gemini: 'GEMINI_API_KEY' };
 const configured = () => Object.keys(PROV).filter(p => env.MOCK_MODELS || (env[KEYS[p]] && env['MODEL_' + p.toUpperCase()]));
@@ -288,16 +288,27 @@ async function ingest(c: any, u: any, x: any = {}): Promise<any> {
   if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);
   const f: any = await c.req.parseBody({ all: true }), mode = x.mode || f.mode, files = [].concat(f.photos || []);
   if (!['jaw', 'deer', 'bc'].includes(mode) || !files.length || files.length > 8) return c.json({ error: 'invalid_input' }, 400);
-  let buck = null; if (f.buck_id) { [buck] = await q('select id from bucks where id=$1 and user_id=$2', [f.buck_id, u.id]); if (!buck) return c.json({ error: 'not_found' }, 404); }
-  const imgs: any[] = [], stored: any[] = []; let storageDown = false;
+  const dfiles = mode === 'jaw' ? ([] as any[]).concat(f.deer_photos || []) : []; // optional photos of the live deer, jaw scans only
+  if (dfiles.length > 4 || files.length + dfiles.length > 12) return c.json({ error: 'invalid_input' }, 400);
+  let buck: any = null; if (f.buck_id) { [buck] = await q('select id from bucks where id=$1 and user_id=$2', [f.buck_id, u.id]); if (!buck) return c.json({ error: 'not_found' }, 404); }
+  const bname = String(f.buck_name || '').trim().slice(0, 80);
+  if (!buck && bname) { [buck] = await q('select id from bucks where user_id=$1 and lower(name)=lower($2) limit 1', [u.id, bname]); if (!buck) [buck] = await q('insert into bucks(user_id,name) values($1,$2) returning id', [u.id, bname]); }
+  if (dfiles.length && !buck) return c.json({ error: 'deer_name_required' }, 400); // deer photos need a named deer to tie to
+  const imgs: any[] = [], stored: any[] = []; let storageDown = false; const dstored: any[] = [];
   for (const file of files as any[]) { if (!file.type?.startsWith('image/')) return c.json({ error: 'bad_image' }, 400); if (file.size > 4.9e6) return c.json({ error: 'photo_too_large' }, 413); // AI vision limit is about 5 MB per photo
     const buf = Buffer.from(await file.arrayBuffer()), h = sha(buf.toString('latin1')).slice(0, 24), key = `${u.id}/${h}.jpg`; // content-addressed: identical photos are stored once per user
     try { if (!(await s3.file(key).exists())) await s3.write(key, buf, { type: file.type }); stored.push({ key, bytes: buf.length, sha: h }); } catch (e: any) { console.error('s3 write failed', e.message); storageDown = true; } // keep going: the analysis still works from memory
     ; imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
+  for (const file of dfiles) { if (!file.type?.startsWith('image/')) return c.json({ error: 'bad_image' }, 400); if (file.size > 4.9e6) return c.json({ error: 'photo_too_large' }, 413);
+    const buf = Buffer.from(await file.arrayBuffer()), key = `${u.id}/${sha(buf.toString('latin1')).slice(0, 24)}.jpg`;
+    try { if (!(await s3.file(key).exists())) await s3.write(key, buf, { type: file.type }); dstored.push({ key, bytes: buf.length }); } catch (e: any) { console.error('s3 write failed', e.message); storageDown = true; }
+    imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
+  if (dfiles.length) (imgs as any).note = `\n\nNOTE: the last ${dfiles.length} photo(s) show the live animal (not the jaw). Use them only as weak supporting evidence for body condition and size; the jaw tooth wear takes precedence, and do not raise confidence because of them.\n\n`;
   const [s] = await q('insert into scans(user_id,buck_id,mode,flags,partner_id,ext) values($1,$2,$3,$4,$5,$6) returning *', [u.id, buck?.id || null, mode, { usable: false, pending: true }, x.partner_id || null, x.ext || null]); // saved before analysis so photos are never orphaned
   for (const [i, p] of stored.entries()) await q('insert into photos(scan_id,s3_key,slot,bytes,sha) values($1,$2,$3,$4,$5)', [s.id, p.key, i, p.bytes, p.sha]);
+  for (const d of dstored) if (!(await q('select 1 from buck_photos where buck_id=$1 and s3_key=$2', [buck.id, d.key])).length) await q("insert into buck_photos(buck_id,s3_key,kind,caption,bytes) values($1,$2,'field','From jaw scan',$3)", [buck.id, d.key, d.bytes]);
   const r: any = await runAnalysis(s, u, imgs); if (r.error) return fail(c, r, s.id);
-  return { scan: r.scan, out: { ...(await report(r.scan)), buck_id: buck?.id || null, needs_more_photos: r.needs_more, storage_down: storageDown } };
+  return { scan: r.scan, out: { ...(await report(r.scan)), buck_id: buck?.id || null, deer_photos: dstored.length, needs_more_photos: r.needs_more, storage_down: storageDown } };
 }
 app.post('/api/scans', auth, async c => { const r = await ingest(c, c.get('user')); return r instanceof Response ? r : c.json(r.out); });
 app.post('/api/scans/:id/reanalyze', auth, gate, async c => { const u = c.get('user'), s = await mine(c); if (!s) return c.json({ error: 'not_found' }, 404); if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);

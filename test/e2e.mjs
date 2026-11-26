@@ -55,6 +55,17 @@ r = await call('POST', '/scans', scanForm('bc'), A); ok('unusable photos flagged
 r = await call('GET', '/me', null, A); ok('unusable scan did not burn a trial scan', r.j.scans_used === 1, r.j.scans_used);
 await call('POST', '/scans', scanForm('jaw', bid), A); await call('POST', '/scans', scanForm('jaw', bid), A); r = await call('POST', '/scans', scanForm('jaw', bid), A); ok('trial scan limit enforced', r.s === 402 && r.j.error === 'subscription_required', r);
 await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_annual')); r = await call('GET', '/me', null, A); ok('trial converts to active, scanning resumes', r.j.can_scan === true && r.j.sub_status === 'active', r.j);
+// ---- named deer + deer photos on jaw scans
+{ const dj = n => new Blob([Buffer.from('/9j/4AAQSkZJRg==', 'base64'), Buffer.from('deer' + n)], { type: 'image/jpeg' });
+  let f = new FormData(); f.append('mode', 'jaw'); f.append('photos', jpg(), 'a.jpg'); f.append('deer_photos', dj(1), 'd.jpg');
+  r = await call('POST', '/scans', f, A); ok('deer photos without a name rejected', r.s === 400 && r.j.error === 'deer_name_required', r);
+  f = new FormData(); f.append('mode', 'jaw'); f.append('buck_name', 'Split Brow'); f.append('photos', jpg(), 'a.jpg'); f.append('deer_photos', dj(1), 'd1.jpg'); f.append('deer_photos', dj(2), 'd2.jpg');
+  r = await call('POST', '/scans', f, A); ok('jaw scan with name and deer photos', r.s === 200 && r.j.buck_id && r.j.deer_photos === 2, r);
+  const bid = r.j.buck_id; r = await call('GET', '/bucks/' + bid, null, A); ok('deer created and photos tied as field', r.j.name === 'Split Brow' && (r.j.photo_list || []).filter(p => p.kind === 'field').length === 2, r.j);
+  f = new FormData(); f.append('mode', 'jaw'); f.append('buck_name', 'split brow'); f.append('photos', jpg(), 'a.jpg'); r = await call('POST', '/scans', f, A);
+  ok('same name reuses the deer', r.s === 200 && r.j.buck_id === bid, r);
+  f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); f.append('photos', jpg(), 'a.jpg'); for (let i = 0; i < 5; i++) f.append('deer_photos', dj(10 + i), 'x.jpg');
+  r = await call('POST', '/scans', f, A); ok('more than 4 deer photos rejected', r.s === 400, r);  await db.query('delete from bucks where id=$1', [bid]); await db.query("delete from scans where id in (select id from scans where buck_id is null and created_at>now()-interval '1 minute' and false)"); }
 r = await call('GET', '/scans/' + sid, null, A); ok('scan detail has report + signed photo urls', r.j.photos.length === 2 && r.j.runs.length === 3, r.j);
 r = await call('PATCH', '/scans/' + sid, { notes: 'hay + doe pee out' }, A); r = await call('GET', '/scans/' + sid, null, A); ok('notes persist', r.j.notes === 'hay + doe pee out');
 // --- B&C
