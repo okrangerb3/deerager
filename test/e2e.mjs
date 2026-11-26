@@ -59,6 +59,9 @@ await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_a
 { let f = new FormData(); f.append('mode', 'jaw'); f.append('buck_name', 'Old Timer'); f.append('photos', jpg(), 'a.jpg'); r = await call('POST', '/scans', f, A);
   ok('scan for mismatch flow', r.s === 200 && r.j.id, r); const sid = r.j.id;
   r = await call('PATCH', '/scans/' + sid, { user_age: '6.5+' }, A); ok('known age saved', r.s === 200, r); r = await call('GET', '/scans/' + sid, null, A); ok('known age returned on report', r.j.user_age === '6.5+', r.j.user_age);
+  r = await call('PATCH', '/scans/' + sid, { approval: 'too_young' }, A); ok('approval saved', r.s === 200, r); r = await call('GET', '/scans/' + sid, null, A); ok('approval returned', r.j.approval === 'too_young', r.j.approval);
+  r = await call('PATCH', '/scans/' + sid, { approval: 'maybe' }, A); ok('bad approval rejected', r.s === 400, r);
+  r = await call('GET', '/admin/models/overview', null, AD); ok('admin sees approval stats', r.s === 200 && r.j.approval.total.answered >= 1 && r.j.approval.rejected.length >= 1, r.j.approval);
   r = await call('PATCH', '/scans/' + sid, { user_age: '9' }, A); ok('bad known age rejected', r.s === 400, r);
   const used = (await call('GET', '/me', null, A)).j.scans_used;
   f = new FormData(); f.append('mode', 'jaw'); f.append('retake_of', sid); f.append('buck_name', 'Old Timer'); f.append('photos', jpg(), 'b.jpg'); r = await call('POST', '/scans', f, A);
