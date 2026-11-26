@@ -69,10 +69,16 @@ r = await call('PUT', '/bucks/' + bid, { name: 'hijack' }, B); r = await call('G
 r = await call('GET', '/admin/users', null, B); ok('normal user blocked from admin API', r.s === 403, r);
 // --- sharing, email, notifications
 r = await call('POST', `/scans/${sid}/share`, undefined, A); const tok = (r.j.url || '').split('/s/')[1]; ok('share link created', /^[a-f0-9]{32}$/.test(tok), r);
-r = await call('GET', '/share/' + tok); ok('public report has comparison, no personal data', r.j.runs.length === 3 && !JSON.stringify(r.j).includes('a@test.com') && !r.j.user_id && !r.j.photos, r.j);
+r = await call('GET', '/share/' + tok); { const ph = r.j.photos || []; const pr = ph.length ? await fetch(BASE + ph[0]) : { status: 0, headers: new Headers() }; ok('shared scan link includes photos that load without login', ph.length === 2 && pr.status === 200 && (pr.headers.get('content-type') || '').startsWith('image'), { ph, st: pr.status }); const bad = await fetch(BASE + `/api/share/${tok}/p/99`); ok('unknown photo slot 404s', bad.status === 404); }
+r = await call('GET', '/share/' + tok); ok('public report has comparison, no personal data', r.j.runs.length === 3 && !JSON.stringify(r.j).includes('a@test.com') && !r.j.user_id, r.j);
 const before = (await db.query("select count(*)::int n from email_log where kind='result'")).rows[0].n;
 r = await call('POST', `/scans/${sid}/email`, { to: ['x@test.com', 'y@test.com', 'bad'] }, A); ok('results emailed to other addresses', r.j.sent === 2, r);
 r = await call('PUT', '/prefs', { results_email: true, billing: true, extra_emails: ['camp@test.com', 'nope', 'camp@test.com'] }, A); ok('notification prefs saved + sanitized', r.j.extra_emails.length === 1, r.j);
+r = await call('PUT', '/prefs', { results_email: true, billing: true, extra_emails: ['camp@test.com'], profiles: [{ name: 'Club', kind: 'club', min_age: 4.5, min_points: '8', min_spread: 99, season_limit: 2, does_first: 1, antler_rule: 'x'.repeat(300), notes: 'Report in 24h' }, { name: 'Public', kind: 'bogus', min_age: 3 }] }, A); const rp = r.j.profiles || [];
+ok('hunting rule profiles saved + sanitized', rp.length === 2 && rp[0].min_points === 8 && rp[0].min_spread === 40 && rp[0].antler_rule.length === 200 && rp[1].kind === 'private' && rp[1].min_age === null && r.j.extra_emails.length === 1, r.j);
+r = await call('PUT', '/prefs', { results_email: true, billing: true, extra_emails: ['camp@test.com'], profiles: rp, active_profile: rp[0].id }, A); ok('active profile set', r.j.active_profile === rp[0].id, r.j);
+r = await call('PUT', '/prefs', { results_email: true, billing: true, extra_emails: ['camp@test.com'] }, A); ok('prefs update keeps profiles', (r.j.profiles || []).length === 2 && r.j.active_profile === rp[0].id, r.j);
+r = await call('PUT', '/bucks/' + bid, { ...(await call('GET', '/bucks/' + bid, null, A)).j, property_kind: 'club', property_name: 'Oak Ridge', status: 'passed' }, A); r = await call('GET', '/bucks/' + bid, null, A); ok('buck property + status saved, scans carry dist', r.j.property_kind === 'club' && r.j.status === 'passed' && r.j.scan_list.some(x => x.dist), r.j);
 await call('POST', '/scans', scanForm('jaw', bid), A); await new Promise(r => setTimeout(r, 600));
 ok('auto-email sends results to me + extras', (await db.query("select count(*)::int n from email_log where kind='result'")).rows[0].n === before + 2 + 2);
 // --- profile + password
@@ -149,7 +155,9 @@ const pid2 = (await call('GET', `/bucks/${lid}`, null, A)).j.photo_list[0].id; a
 // --- buck data sheet, sharing, admin drilldowns
 r = await call('GET', `/bucks/${lid}/sheet`, null, A); ok('buck sheet has name, points and a hero image slot', r.s === 200 && r.j.name === 'Lightning' && r.j.points === 8 && 'hero' in r.j && Array.isArray(r.j.scans), r.j);
 r = await call('POST', `/bucks/${lid}/share`, null, A); ok('buck share link created', r.s === 200 && /\/b\/[0-9a-f]{32}$/.test(r.j.url), r); const btok = r.j.url.split('/b/')[1];
+{ const f2 = new FormData(); f2.append('kind', 'rack'); f2.append('photo', jpg(), 'r.jpg'); await call('POST', `/bucks/${lid}/photos`, f2, A); }
 r = await call('GET', '/bshare/' + btok); ok('public buck sheet loads without login and hides owner data', r.s === 200 && r.j.name === 'Lightning' && !JSON.stringify(r.j).includes('a@test.com'), r.j);
+{ const u = r.j.hero || (r.j.photos || [])[0]?.url, pr = u ? await fetch(BASE + u) : { status: 0, headers: new Headers() }; ok('shared buck sheet photos load via the link', !!u && u.startsWith('/api/bshare/') && pr.status === 200 && (pr.headers.get('content-type') || '').startsWith('image'), { u, st: pr.status }); const bp = await fetch(BASE + '/api/bshare/' + btok + '/p?k=other'); ok('photo not on this buck is refused', bp.status === 404); }
 r = await call('GET', '/bshare/nope'); ok('bad buck link is 404', r.s === 404, r);
 r = await call('POST', `/bucks/${lid}/email`, { to: ['friend@test.com'] }, A); ok('buck sheet email sends', r.s === 200 && r.j.sent === 1, r);
 r = await call('POST', `/bucks/${lid}/share-member`, { email: 'nobody@test.com' }, A); ok('sharing with a non-member is refused', r.s === 404 && r.j.error === 'member_not_found', r);

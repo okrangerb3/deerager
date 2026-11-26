@@ -11,6 +11,10 @@ Cancel any time in Account (Stripe is updated). Annual subscribers keep their sa
 ## Scans, results and the shoot / pass decision
 Photo step: take a photo or upload (every photo prompt offers both); one photo is enough to start, and each photo is checked for quality. Modes: **jawbone** (most accurate), **live deer / trail camera** (weaker, confidence capped at 60%) and **antler photo** for a B&C estimate.
 Each result shows: the age estimate, a chance for each age (0.5 through 6.5+), the confidence and why it is limited, why the AI reached the result, the tooth/body features it saw, other ages considered, photo notes, and what would firm it up.
+**Hunting rules.** Hunters can save up to 8 rule sets (public land, club/lease, private): minimum age, points, inside spread, net B&C, season buck limit, does-first, legal antler rule and notes. The active set drives the "Can I shoot him?" card and a Shooter check on each buck (meets / doesn't meet / need more info). Bucks also record property type, property name and status (watching/passed/harvested).
+
+**Share links** (scan `/s/…` and buck sheet `/b/…`) include the photos. Photos are served through the link itself, so they keep working as long as the link does and nothing else in the bucket is exposed.
+
 **Can I shoot him?** The hunter picks a minimum age (3.5+, 4.5+, 5.5+, 6.5+; remembered). The card gives the chance he meets it: 70%+ looks old enough, 50-70% leaning old enough but not firm, 30-50% leaning too young, under 30% probably too young. Probabilities blend the AI's own distribution with a population prior, trusting the photos less when quality is low (cap 90% jaw, 60% deer photo). The cutoffs and prior are first guesses until calibrated against lab-aged jaws. Everything is labelled an estimate.
 If photo storage is down the analysis still runs and the result says the photos were not saved.
 
