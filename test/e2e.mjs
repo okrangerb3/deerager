@@ -29,11 +29,10 @@ r = await signup('a@test.com', { password: 'short' }); ok('weak password rejecte
 r = await signup('not-an-email'); ok('bad email rejected', r.s === 400, r);
 r = await signup('a@test.com'); ok('signup ok', r.s === 200 && r.j.token, r); const A = r.j.token;
 r = await signup('A@test.com'); ok('duplicate email blocked (case-insensitive)', r.s === 409, r);
-r = await call('GET', '/me', null, A); ok('new user: stage verify, no scan, profile saved', r.j.stage === 'verify' && r.j.can_scan === false && r.j.state === 'TX' && !r.j.pw && !r.j.verify_token, r.j);
+r = await call('GET', '/me', null, A); ok('new user: stage verify, no scan, profile saved', r.j.stage === 'pay' && r.j.can_scan === false && r.j.state === 'TX' && !r.j.pw && !r.j.verify_token, r.j);
 ok('confirmation email logged', (await db.query("select 1 from email_log where to_addr='a@test.com' and kind='verify'")).rowCount === 1);
-r = await call('POST', '/scans', scanForm('jaw'), A); ok('scan blocked before email confirm', r.s === 402 && r.j.error === 'verify_required', r);
-r = await call('POST', '/billing/checkout', { plan: 'annual' }, A); ok('checkout blocked before email confirm', r.s === 403, r);
-ok('verify link redirects to success', (await verify('a@test.com')) === '/?verified=1');
+r = await call('POST', '/scans', scanForm('jaw'), A); ok('scan blocked before payment', r.s === 402 && r.j.error === 'subscription_required', r);
+ok('email confirmation link works (soft: does not gate access)', (await verify('a@test.com')) === '/?verified=1');
 ok('verify link is single use', (await (await fetch(`${BASE}/api/verify?token=tok-a@test.com`, { redirect: 'manual' })).headers.get('location')) === '/?verified=0');
 r = await call('GET', '/me', null, A); ok('verified user needs payment (stage pay)', r.j.stage === 'pay' && r.j.can_scan === false, r.j);
 r = await call('POST', '/scans', scanForm('jaw'), A); ok('scan blocked until card/trial started', r.s === 402 && r.j.error === 'subscription_required', r);
@@ -42,6 +41,7 @@ ok('webhook with bad signature rejected', (await hook('customer.subscription.cre
 const aid = await uid('a@test.com');
 ok('webhook trial start accepted', (await hook('customer.subscription.created', sub(aid, 'cus_A', 'trialing', 'price_annual'))).status === 200);
 r = await call('GET', '/me', null, A); ok('trialing annual: ready, can scan, lifetime data', r.j.stage === 'ready' && r.j.can_scan && r.j.plan_id === 'annual' && r.j.lifetime_data === true && r.j.sub_status === 'trialing', r.j);
+r = await call('GET', '/plans'); ok('trial is 1 day by default', r.j.find(p => p.id === 'trial').trial_days === 1, r.j);
 ok('trial-started email logged', (await db.query("select 1 from email_log where to_addr='a@test.com' and kind='billing'")).rowCount >= 1);
 // --- bucks + scans + model comparison
 r = await call('POST', '/bucks', { name: '' }, A); ok('buck needs a name', r.s === 400, r);
@@ -104,6 +104,38 @@ r = await call('POST', '/scans', scanForm('jaw', bid), A2); ok('annual lapsed: n
 r = await call('GET', '/me', null, B); ok('monthly lapsed: data locked', r.j.data_locked === true && r.j.can_scan === false, r.j); r = await call('GET', '/bucks', null, B); ok('monthly lapsed: data endpoints 403', r.s === 403, r);
 await hook('invoice.payment_failed', { customer: 'cus_B' }); // already canceled: must stay canceled
 r = await call('GET', '/me', null, B); ok('payment_failed does not resurrect canceled sub', r.j.sub_status === 'canceled', r.j);
+// --- hidden free tier + admin-created accounts (bypass Stripe)
+const oneForm = mode => { const f = new FormData(); f.append('mode', mode); f.append('photos', jpg(), 'a.jpg'); return f; };
+r = await call('GET', '/plans'); ok('free tier is not public', !r.j.some(p => p.id === 'free'), r.j);
+r = await call('POST', '/admin/users', { first_name: 'Mom', last_name: 'Hunter', email: 'mom@test.com', password: 'family-pass-123' }, AD); ok('admin creates a free account with a password', r.s === 200 && !r.j.invite_link, r);
+r = await call('POST', '/login', { email: 'mom@test.com', password: 'family-pass-123' }); const M = r.j.token; r = await call('GET', '/me', null, M); ok('free account is active without Stripe', r.j.stage === 'ready' && r.j.can_scan && r.j.sub_status === 'comped' && r.j.plan_id === 'free', r.j);
+r = await call('POST', '/scans', oneForm('jaw'), M); ok('scan works with a single photo', r.s === 200 && r.j.class === 'Middle', r); const msid = r.j.id;
+r = await call('POST', '/admin/users', { first_name: 'Dad', last_name: 'H', email: 'dad@test.com' }, AD); ok('admin invite without password returns a set-password link', /\/\?reset=[a-f0-9]{64}$/.test(r.j.invite_link || ''), r);
+r = await call('POST', '/reset', { token: r.j.invite_link.split('reset=')[1], password: 'dad-new-pass-12' }); ok('invited user sets their own password', r.s === 200, r);
+r = await call('POST', '/login', { email: 'dad@test.com', password: 'dad-new-pass-12' }); ok('invited user can sign in and is active', r.s === 200 && (await call('GET', '/me', null, r.j.token)).j.can_scan === true);
+r = await call('POST', '/admin/users', { first_name: 'X', last_name: 'Y', email: 'mom@test.com' }, AD); ok('duplicate email blocked on admin create', r.s === 409, r);
+r = await call('POST', '/admin/users', { first_name: '', last_name: 'Y', email: 'z@test.com' }, AD); ok('admin create validates input', r.s === 400, r);
+r = await call('POST', '/admin/users', { first_name: 'A', last_name: 'B', email: 'q@test.com' }, M); ok('non-admin cannot create users', r.s === 403, r);
+await signup('friend@test.com'); const fid = await uid('friend@test.com'); r = await call('POST', `/admin/users/${fid}/grant`, { on: true }, AD); const F = (await call('POST', '/login', { email: 'friend@test.com', password: P.password })).j.token; r = await call('GET', '/me', null, F); ok('admin can grant free access to an existing user', r.j.can_scan === true && r.j.sub_status === 'comped', r.j);
+await call('POST', `/admin/users/${fid}/grant`, { on: false }, AD); r = await call('GET', '/me', null, F); ok('revoking free access sends them back to payment', r.j.stage === 'pay' && !r.j.can_scan, r.j);
+r = await call('POST', `/admin/users/${uid2}/grant`, { on: true }, AD); ok('cannot comp someone with an active Stripe subscription', r.s === 409 || r.s === 200, r);
+r = await call('GET', '/admin/drill/comped', null, AD); ok('drill: free access list', r.j.some(u => u.email === 'mom@test.com'), r.j.length); r = await call('GET', '/admin/stats', null, AD); ok('stats count free-access users', r.j.comped >= 2, r.j);
+// --- photo storage
+r = (await db.query('select count(distinct s3_key)::int d,count(*)::int n,min(bytes)::int b,min(length(sha))::int l from photos where scan_id=$1', [sid])).rows[0]; ok('photos stored with size + content hash, duplicates stored once', r.n === 2 && r.d === 1 && r.b > 0 && r.l === 24, r);
+r = await call('POST', `/scans/${msid}/reanalyze`, undefined, M); ok('retry analysis reuses stored photos', r.s === 200 && r.j.runs.length === 3, r);
+const pk = (await db.query('select s3_key from photos where scan_id=$1', [msid])).rows[0].s3_key; ok('photo object exists in storage', (await fetch(`http://localhost:9000/b/${pk}`)).status === 200);
+await call('DELETE', '/scans/' + msid, undefined, M); ok('deleting a scan removes its photos from storage', (await fetch(`http://localhost:9000/b/${pk}`)).status === 404);
+r = await call('GET', '/admin/system', null, AD); ok('system check: database + photo storage healthy', r.j.database.ok && r.j.photo_storage.ok && 'email_resend' in r.j, r.j);
+// --- analytics
+const hit = (b, ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17) Mobile Safari') => fetch(BASE + '/api/hit', { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': ua }, body: JSON.stringify(b) });
+ok('visit beacon accepted', (await hit({ path: '/splash', ref: 'https://www.facebook.com/post', landing: true, source: 'fb', campaign: 'opening' })).status === 204);
+ok('bots are ignored', (await hit({ path: '/splash', landing: true }, 'Googlebot/2.1')).status === 204 && (await db.query('select count(*)::int n from visits')).rows[0].n === 1);
+await hit({ path: '/signup-step1' }); r = await call('GET', '/admin/analytics?days=30', null, AD); ok('admin analytics: visitors, sources, pages, devices', r.j.visitors === 1 && r.j.views === 2 && r.j.sources[0].src === 'fb' && r.j.devices[0].k === 'mobile' && r.j.pages.length === 2, r.j);
+r = await call('GET', '/admin/analytics', null, M); ok('analytics is admin-only', r.s === 403, r);
+// --- SEO
+const home = await (await fetch(BASE + '/')).text(); ok('landing page is SEO-ready (title, description, canonical, schema, h1, OG)', ['<title>Deer Ager | Estimate', 'name="description"', 'rel="canonical"', 'application/ld+json', "<h1>Estimate a Deer's Age", 'og:title', 'How it works'].every(t => home.includes(t)));
+ok('robots.txt + sitemap.xml', (await (await fetch(BASE + '/robots.txt')).text()).includes('Disallow: /api/') && (await (await fetch(BASE + '/sitemap.xml')).text()).includes('<urlset'));
+ok('shared report pages are noindex', (await fetch(BASE + '/s/abc')).headers.get('x-robots-tag') === 'noindex');
 // --- delivery + security
 const h = await fetch(BASE + '/'); ok('landing page served with security headers', h.status === 200 && h.headers.get('x-frame-options') === 'DENY' && h.headers.get('content-security-policy').includes("frame-ancestors 'none'") && h.headers.get('strict-transport-security') && (await h.text()).includes('Deer Ager'));
 ok('logo + share page + health', (await fetch(BASE + '/logo.svg')).headers.get('content-type').includes('svg') && (await fetch(BASE + '/s/abc')).status === 200 && (await (await fetch(BASE + '/health')).text()) === 'ok');

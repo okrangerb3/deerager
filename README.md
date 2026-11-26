@@ -4,7 +4,8 @@ Estimate a whitetail's age from jawbone photos, keep a private log of every buck
 Bun + Hono + Postgres + S3 bucket + Stripe + Resend. One service serves the API and the web app.
 
 ## Flow
-Splash → create account (name, address, phone, email, password) → confirmation email (Resend) → account active → add a card (Stripe Checkout, 7-day free trial; card, Apple Pay, Google Pay) → scan, score, log bucks.
+Splash → step 1 details (name, address, phone, email, password) → step 2 pick monthly/annual → Stripe Checkout (card, Apple Pay, Google Pay; 1-day free trial, card required) → the account activates when Stripe confirms the card → scan, score, log bucks. A confirmation email is sent but does not block access.
+Free tier: hidden from the public. Admins create accounts (Admin > Users > Add a user) or grant free access to existing users; those accounts skip Stripe.
 Cancel any time in Account (Stripe is updated). Annual subscribers keep their saved data for life; if a plan is not active nobody can scan new deer, and monthly subscribers' data is hidden until they resubscribe.
 
 ## Deploy on Railway
@@ -15,6 +16,9 @@ Cancel any time in Account (Stripe is updated). Annual subscribers keep their sa
 5. **Admin > Plans** sets trial length and prices; the Stripe price is created on first checkout (a price change creates a new one).
 
 Single-file alternative (no GitHub): `node build.mjs` writes `dist/index.tsx`, a self-contained file that can run as a Railway Function.
+
+## Analytics, SEO and storage
+First-party, cookie-free analytics (Admin > Analytics): visitors, sources (referrer and ?utm_source=), pages/steps, devices, signups and conversions; no IPs are stored. The landing page is prerendered with title, description, canonical, Open Graph and FAQ/SoftwareApplication schema; `/robots.txt` and `/sitemap.xml` are served. Submit the sitemap in Google Search Console. Photos are re-encoded in the browser (strips GPS/EXIF), stored content-addressed in the bucket, saved before analysis so a failed analysis can be retried, and deleted with their scan. Admin > Settings > System check tests storage, Stripe, email and AI keys.
 
 ## Admin console
 Overview cards are clickable: free trials, Pro subscribers, total scans (who scans the most), past due, unverified. Open any user to see details (never passwords), scans, bucks and emails; send a password reset or confirmation email, suspend, grant lifetime data. Users, plans, Stripe, Resend and the model benchmark are all managed there.

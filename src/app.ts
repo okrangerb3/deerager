@@ -19,7 +19,7 @@ async function setSetting(k: string, v: string, by: any) { const s = SECRETS.inc
 
 const SCHEMA = `create extension if not exists pgcrypto;
 create table if not exists plans(id text primary key,name text,price_cents int,interval text,trial_days int default 0,trial_scans int default 0,stripe_price_id text,active bool default true);
-insert into plans values('trial','Free trial',0,'none',7,3,null,true),('monthly','Pro Monthly',799,'month',0,0,null,true),('annual','Pro Annual',4999,'year',0,0,null,true),('lapsed','Lapsed',0,'none',0,0,null,false) on conflict do nothing;
+insert into plans values('trial','Free trial',0,'none',1,3,null,true),('free','Family & friends (free)',0,'none',0,0,null,false),('monthly','Pro Monthly',799,'month',0,0,null,true),('annual','Pro Annual',4999,'year',0,0,null,true),('lapsed','Lapsed',0,'none',0,0,null,false) on conflict do nothing;
 update plans set active=false where id='pro';
 create table if not exists users(id uuid primary key default gen_random_uuid(),email text unique not null,pw text not null,role text default 'user',status text default 'active',plan_id text references plans(id) default 'trial',stripe_customer text,trial_start timestamptz default now(),scans_used int default 0,created_at timestamptz default now());
 create table if not exists bucks(id uuid primary key default gen_random_uuid(),user_id uuid references users(id) on delete cascade,name text not null,hunted_on date,location text,stand text,wind_dir text,temp_f int,rut_phase text,tactics jsonb default '[]',notes text,bc jsonb,created_at timestamptz default now());
@@ -29,24 +29,28 @@ create table if not exists model_runs(id bigserial primary key,scan_id uuid refe
 create table if not exists audit(id bigserial primary key,actor uuid,action text,detail jsonb,at timestamptz default now());
 create table if not exists settings(key text primary key,value text not null,secret bool default false,updated_at timestamptz default now(),updated_by uuid);
 create table if not exists email_log(id bigserial primary key,to_addr text,subject text,kind text,status text,error text,at timestamptz default now());
+create table if not exists visits(id bigserial primary key,at timestamptz default now(),path text,ref text,utm_source text,utm_medium text,utm_campaign text,visitor text,device text,country text,landing bool default false);
+create index if not exists visits_at on visits(at);
 create index if not exists scans_user on scans(user_id,created_at desc);`;
 await db.query(SCHEMA);
 const cols = ['first_name text', 'last_name text', 'address text', 'city text', 'state text', 'zip text', 'phone text', 'email_verified_at timestamptz', 'verify_token text', 'reset_token text', 'reset_expires timestamptz', "sub_status text default 'none'", 'stripe_sub text', 'lifetime_data bool default false', 'cancel_at_end bool default false', 'period_end timestamptz', `prefs jsonb default '{"results_email":false,"billing":true,"extra_emails":[]}'`];
 for (const c of cols) await db.query(`alter table users add column if not exists ${c}`);
 await db.query('alter table scans add column if not exists buck_id uuid references bucks(id) on delete set null');
 await db.query('alter table model_runs add column if not exists confidence int');
+await db.query('alter table photos add column if not exists bytes int'); await db.query('alter table photos add column if not exists sha text'); await db.query('alter table scans add column if not exists counted bool default false');
+if ((await q("insert into settings(key,value) values('migr_trial_1day','1') on conflict do nothing returning key")).length) await q("update plans set trial_days=1 where id='trial'"); // one-time: 1-day trial
 if (env.ADMIN_EMAIL && env.ADMIN_PASSWORD) await db.query("insert into users(email,pw,role,first_name,last_name,email_verified_at) values($1,$2,'admin','Admin','User',now()) on conflict(email) do update set role='admin',email_verified_at=coalesce(users.email_verified_at,now())", [env.ADMIN_EMAIL.toLowerCase(), bcrypt.hashSync(env.ADMIN_PASSWORD, 12)]);
 if (env.STRIPE_PUBLISHABLE_KEY) await db.query("insert into settings(key,value) values('stripe_publishable_key',$1) on conflict do nothing", [env.STRIPE_PUBLISHABLE_KEY]);
 
 // ---------- domain logic
 const classify = (o: any) => {
-  if (!o || o.usable === false) return { cls: null, range: null };
-  if (o.premolar3_temporary === true) return { cls: 'Fawn', range: 'Under 1 year' };
-  const w = Number(o.molar_wear); if (o.molar_wear == null || !Number.isFinite(w)) return { cls: null, range: null };
-  if (w <= 0) return { cls: 'Yearling', range: 'About 1.5 years' };
-  if (w === 1) return { cls: '2.5', range: 'About 2.5 years' };
-  if (w === 2) return { cls: 'Middle', range: 'About 3.5-5.5 years' };
-  return { cls: 'Old', range: '6+ years (wear aging is unreliable here)' };
+  if (!o || o.usable === false) return { cls: null, range: null, rule: null };
+  if (o.premolar3_temporary === true) return { cls: 'Fawn', range: 'Under 1 year', rule: 'The 3rd premolar is still a baby (temporary) tooth, which only fawns have, so this is a fawn.' };
+  const w = Number(o.molar_wear); if (o.molar_wear == null || !Number.isFinite(w)) return { cls: null, range: null, rule: null };
+  if (w <= 0) return { cls: 'Yearling', range: 'About 1.5 years', rule: 'Permanent teeth with almost no molar wear (grade 0, just erupted) means a yearling, about 1.5 years.' };
+  if (w === 1) return { cls: '2.5', range: 'About 2.5 years', rule: 'Light molar wear (grade 1) means about 2.5 years.' };
+  if (w === 2) return { cls: 'Middle', range: 'About 3.5-5.5 years', rule: 'Moderate molar wear (grade 2, dentine wider than enamel) means middle-aged, about 3.5 to 5.5 years.' };
+  return { cls: 'Old', range: '6+ years (wear aging is unreliable here)', rule: 'Heavy molar wear (grade 3) means an older deer, 6+ years. Wear is the least reliable way to age deer at this stage.' };
 };
 const bc = ({ l, r, spread = 0, abnormal = 0 }: any) => {
   const sum = (a: any[]) => a.reduce((x, y) => x + (+y || 0), 0);
@@ -59,11 +63,11 @@ const PROMPT: any = {
   deer: 'You assist a hunter estimating the age class of a whole white-tailed deer from body photos. This is unreliable: cap confidence at 60.',
   bc: 'You estimate Boone and Crockett typical whitetail net score from antler photos using a visible scale reference. If none, usable=false.'
 };
-const FORMAT = ' Reply with ONLY JSON: {"usable":bool,"quality":0-100,"premolar3_temporary":bool|null,"molar_wear":0|1|2|3|null,"net_low":number|null,"net_high":number|null,"confidence":0-100,"evidence":[string],"missing":[specific extra photo or fix needed],"issues":[string]}. Wear: 0 unworn/just erupted, 1 light, 2 moderate (dentine wider than enamel), 3 heavy. If photos are blurry, glared, dark, incomplete or not what was requested, set usable=false and say exactly what to retake. Never guess.';
+const FORMAT = ' Reply with ONLY one JSON object with these fields: {"usable":bool,"quality":0-100 (overall photo quality),"premolar3_temporary":bool|null,"molar_wear":0|1|2|3|null,"net_low":number|null,"net_high":number|null,"confidence":0-100,"reasoning":"3-6 plain sentences, written for a hunter, explaining how what you saw leads to this age","features":[{"feature":"e.g. 3rd premolar","observation":"what you see","points_to":"what that suggests about age"}],"alternatives":["other age classes you considered and why they are less likely"],"photo_notes":["one note per photo: what it shows and any quality problem"],"evidence":[string],"would_change_answer":["specific extra photo or fact that would raise or change your confidence"],"missing":[specific extra photo or fix needed],"issues":[string]}. Wear scale: 0 unworn/just erupted, 1 light, 2 moderate (dentine wider than enamel), 3 heavy. If photos are blurry, glared, dark, incomplete or not what was requested, set usable=false and say exactly what to retake. Never guess.';
 const post = async (url: string, headers: any, body: any) => { const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }); if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`); return r.json(); };
-const parse = (t: string) => JSON.parse(t.replace(/```json|```/g, '').trim());
+const parse = (t: string) => { const m = t.match(/\{[\s\S]*\}/); return JSON.parse(m ? m[0] : t); };
 const PROV: any = {
-  claude: async (imgs: any[], mode: string) => (await post('https://api.anthropic.com/v1/messages', { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, { model: env.MODEL_CLAUDE, max_tokens: 1000, messages: [{ role: 'user', content: [...imgs.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.b64 } })), { type: 'text', text: PROMPT[mode] + FORMAT }] }] })).content.map((c: any) => c.text || '').join(''),
+  claude: async (imgs: any[], mode: string) => (await post('https://api.anthropic.com/v1/messages', { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, { model: env.MODEL_CLAUDE, max_tokens: 2500, messages: [{ role: 'user', content: [...imgs.map(i => ({ type: 'image', source: { type: 'base64', media_type: i.mime, data: i.b64 } })), { type: 'text', text: PROMPT[mode] + FORMAT }] }] })).content.map((c: any) => c.text || '').join(''),
   openai: async (imgs: any[], mode: string) => (await post('https://api.openai.com/v1/chat/completions', { authorization: 'Bearer ' + env.OPENAI_API_KEY }, { model: env.MODEL_OPENAI, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: [...imgs.map(i => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.b64}` } })), { type: 'text', text: PROMPT[mode] + FORMAT }] }] })).choices[0].message.content,
   gemini: async (imgs: any[], mode: string) => (await post(`https://generativelanguage.googleapis.com/v1beta/models/${env.MODEL_GEMINI}:generateContent?key=${env.GEMINI_API_KEY}`, {}, { contents: [{ parts: [...imgs.map(i => ({ inline_data: { mime_type: i.mime, data: i.b64 } })), { text: PROMPT[mode] + FORMAT }] }], generationConfig: { responseMimeType: 'application/json' } })).candidates[0].content.parts.map((p: any) => p.text || '').join('')
 };
@@ -72,10 +76,11 @@ const configured = () => Object.keys(PROV).filter(p => env.MOCK_MODELS || (env[K
 const MOCK: any = { claude: [2, 82], openai: [2, 71], gemini: [1, 58] };
 async function runModel(p: string, imgs: any[], mode: string) {
   const t = Date.now(), model = env.MOCK_MODELS ? 'mock-' + p : env['MODEL_' + p.toUpperCase()];
-  if (env.MOCK_MODELS) return { provider: p, model, ms: 1, result: mode === 'bc' ? { usable: false, quality: 80, confidence: 20, missing: ['Add a ruler or hat for scale'], issues: ['No scale reference'] } : { usable: true, quality: 90, premolar3_temporary: false, molar_wear: MOCK[p][0], confidence: MOCK[p][1], evidence: ['mock evidence from ' + p], missing: [], issues: [] } };
+  if (env.MOCK_MODELS) return { provider: p, model, ms: 1, result: mode === 'bc' ? { usable: false, quality: 80, confidence: 20, missing: ['Add a ruler or hat for scale'], issues: ['No scale reference'] } : { usable: true, quality: 90, premolar3_temporary: false, molar_wear: MOCK[p][0], confidence: MOCK[p][1], evidence: ['mock evidence from ' + p], reasoning: 'The third premolar is a permanent tooth and the molar crests show moderate wear, so this deer is middle-aged.', features: [{ feature: '3rd premolar', observation: 'Permanent, two cusps', points_to: 'Yearling or older' }, { feature: 'First molar', observation: 'Dentine wider than enamel', points_to: 'Moderate wear, about 3.5-5.5 years' }], alternatives: ['2.5 years: less likely because the dentine is wider than the enamel'], photo_notes: ['Photo 1: sharp, good light'], would_change_answer: ['A top-down photo of the molars would confirm the wear grade'], missing: [], issues: [] } };
   try { return { provider: p, model, result: parse(await PROV[p](imgs, mode)), ms: Date.now() - t }; } catch (e: any) { return { provider: p, model, error: String(e.message || e).slice(0, 300), ms: Date.now() - t }; }
 }
-const conf = (o: any, mode: string) => Math.max(0, Math.min(o?.confidence ?? 0, o?.quality ?? 100, mode === 'jaw' ? 100 : 60));
+const confDetail = (o: any, mode: string) => { const cap = mode === 'jaw' ? 100 : 60, m = o?.confidence ?? 0, q = o?.quality ?? 100, f = Math.max(0, Math.min(m, q, cap)); return { model: m, quality: q, cap, final: f, limited_by: q < m && q <= cap ? 'photo quality' : cap < m && cap < q ? 'the method limit' : 'AI certainty' }; };
+const conf = (o: any, mode: string) => confDetail(o, mode).final;
 
 // ---------- email (Resend)
 async function mail(to: string, subject: string, body: string, kind = 'misc') {
@@ -88,7 +93,8 @@ async function mail(to: string, subject: string, body: string, kind = 'misc') {
 const btn = (url: string, label: string) => `<p><a href="${url}" style="background:#2f6b3f;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;display:inline-block">${label}</a></p><p style="font-size:12px;color:#666">Or paste this link: ${url}</p>`;
 const eh = (s: any) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as any)[c]);
 async function sendVerify(u: any) { const t = crypto.randomBytes(32).toString('hex'); await q('update users set verify_token=$1 where id=$2', [sha(t), u.id]); return mail(u.email, 'Confirm your Deer Ager account', `<p>Hi ${eh(u.first_name)}, confirm your email to activate your account.</p>${btn(`${env.APP_URL}/api/verify?token=${t}`, 'Confirm my email')}`, 'verify'); }
-async function sendReset(u: any) { const t = crypto.randomBytes(32).toString('hex'); await q("update users set reset_token=$1,reset_expires=now()+interval '1 hour' where id=$2", [sha(t), u.id]); return mail(u.email, 'Reset your Deer Ager password', `<p>Hi ${eh(u.first_name)}, use this link within 1 hour to set a new password.</p>${btn(`${env.APP_URL}/?reset=${t}`, 'Reset password')}<p>If you did not request this, you can ignore it.</p>`, 'reset'); }
+async function makeReset(u: any, hours = 1) { const t = crypto.randomBytes(32).toString('hex'); await q("update users set reset_token=$1,reset_expires=now()+($3||' hours')::interval where id=$2", [sha(t), u.id, String(hours)]); return `${env.APP_URL}/?reset=${t}`; }
+async function sendReset(u: any) { const link = await makeReset(u); return mail(u.email, 'Reset your Deer Ager password', `<p>Hi ${eh(u.first_name)}, use this link within 1 hour to set a new password.</p>${btn(link, 'Reset password')}<p>If you did not request this, you can ignore it.</p>`, 'reset'); }
 const wantsBilling = (u: any) => u.prefs?.billing !== false;
 
 // ---------- app, security, auth
@@ -99,10 +105,10 @@ const hits = new Map<string, number[]>();
 const limited = (c: any, name: string, max = 10) => { if (env.MOCK_MODELS) max = 9999; const ip = (c.req.header('x-forwarded-for') || '').split(',')[0].trim() || 'local', k = name + ip, now = Date.now(), a = (hits.get(k) || []).filter(t => now - t < 9e5); a.push(now); hits.set(k, a); if (hits.size > 5000) hits.clear(); return a.length > max; };
 const s3 = new Bun.S3Client({ endpoint: env.S3_ENDPOINT, bucket: env.S3_BUCKET, region: env.S3_REGION || 'auto', accessKeyId: env.S3_ACCESS_KEY_ID, secretAccessKey: env.S3_SECRET_ACCESS_KEY, virtualHostedStyle: env.S3_VHOST === 'true' });
 const sign = (u: any) => jwt.sign({ id: u.id }, env.JWT_SECRET!, { expiresIn: '30d' });
-const ACTIVE = ['trialing', 'active'];
-const canScan = (u: any) => u.role === 'admin' || (!!u.email_verified_at && ACTIVE.includes(u.sub_status) && (u.sub_status !== 'trialing' || u.scans_used < u.trial_scans));
+const ACTIVE = ['trialing', 'active', 'comped'];
+const canScan = (u: any) => u.role === 'admin' || (ACTIVE.includes(u.sub_status) && (u.sub_status !== 'trialing' || u.scans_used < u.trial_scans));
 const dataOk = (u: any) => u.role === 'admin' || u.lifetime_data || [...ACTIVE, 'past_due'].includes(u.sub_status);
-const stage = (u: any) => !u.email_verified_at ? 'verify' : (u.role === 'admin' || ACTIVE.includes(u.sub_status) || u.sub_status === 'past_due') ? 'ready' : 'pay';
+const stage = (u: any) => (u.role === 'admin' || ACTIVE.includes(u.sub_status) || u.sub_status === 'past_due') ? 'ready' : 'pay';
 const view = (u: any) => { const { pw, verify_token, reset_token, reset_expires, ...v } = u; return { ...v, stage: stage(u), can_scan: canScan(u), data_locked: !dataOk(u) }; };
 const auth = async (c: any, next: any) => {
   try { const p: any = jwt.verify((c.req.header('authorization') || '').replace('Bearer ', ''), env.JWT_SECRET!);
@@ -113,8 +119,16 @@ const auth = async (c: any, next: any) => {
 const admin = async (c: any, next: any) => c.get('user').role === 'admin' ? next() : c.json({ error: 'forbidden' }, 403);
 const gate = async (c: any, next: any) => dataOk(c.get('user')) ? next() : c.json({ error: 'data_locked' }, 403);
 
+app.post('/api/hit', async c => { if (limited(c, 'hit', 300)) return c.body(null, 204); const b = await c.req.json().catch(() => ({})), ua = c.req.header('user-agent') || '';
+  if (!ua || /bot|crawl|spider|slurp|preview|monitor|curl|python|headless/i.test(ua)) return c.body(null, 204);
+  const ip = (c.req.header('x-forwarded-for') || '').split(',')[0].trim(), day = new Date().toISOString().slice(0, 10), visitor = sha(ip + ua + day + env.JWT_SECRET).slice(0, 16); // daily-rotating hash: no cookies, no stored IPs
+  let ref = ''; try { ref = b.ref ? new URL(b.ref).hostname.replace(/^www\./, '') : ''; } catch {} if (ref && env.APP_URL && ref === new URL(env.APP_URL).hostname.replace(/^www\./, '')) ref = '';
+  const dev = /ipad|tablet/i.test(ua) ? 'tablet' : /mobi|android|iphone/i.test(ua) ? 'mobile' : 'desktop', t = (v: any) => (v ? String(v).slice(0, 80) : null);
+  await q('insert into visits(path,ref,utm_source,utm_medium,utm_campaign,visitor,device,country,landing) values($1,$2,$3,$4,$5,$6,$7,$8,$9)', [t(b.path), ref || null, t(b.source), t(b.medium), t(b.campaign), visitor, dev, t(c.req.header('cf-ipcountry')), !!b.landing]); return c.body(null, 204); });
+app.get('/robots.txt', c => c.text(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /s/\nSitemap: ${env.APP_URL || 'https://deerager.com'}/sitemap.xml\n`));
+app.get('/sitemap.xml', c => c.body(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${env.APP_URL || 'https://deerager.com'}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url></urlset>`, 200, { 'content-type': 'application/xml' }));
 app.get('/health', c => c.text('ok'));
-app.get('/', c => c.html(HTML)); app.get('/s/:t', c => c.html(HTML));
+app.get('/', c => c.html(HTML)); app.get('/s/:t', c => { c.header('x-robots-tag', 'noindex'); return c.html(HTML); });
 app.get('/logo.svg', c => c.body(LOGO, 200, { 'content-type': 'image/svg+xml', 'cache-control': 'public,max-age=86400' }));
 app.get('/logo-full.svg', c => c.body(LOGOFULL, 200, { 'content-type': 'image/svg+xml', 'cache-control': 'public,max-age=86400' }));
 
@@ -164,28 +178,41 @@ async function report(s: any) {
     best: best && { provider: best.provider, model: best.model, confidence: best.confidence, observations: best.result }, agree: best ? ok.filter((r: any) => r.class === best.class).length : 0, total: runs.length,
     runs: runs.map((r: any) => ({ provider: r.provider, model: r.model, class: r.class, confidence: r.confidence, ms: r.latency_ms, error: r.error, evidence: r.result?.evidence || [] })), disclaimer: 'Estimate only. Tooth-wear aging is subjective; a lab cementum test is the gold standard.' };
 }
+async function runAnalysis(s: any, u: any, imgs: any[]) {
+  const mode = s.mode, all = configured(); if (!all.length) return { error: 'analysis_unavailable' };
+  const pick = (await getSetting('compare_all')) === 'false' ? [all.includes(env.PRIMARY_MODEL!) ? env.PRIMARY_MODEL! : all[0]] : all;
+  const runs = await Promise.all(pick.map(p => runModel(p, imgs, mode)));
+  const scored = runs.map((r: any) => { const o = r.result, k: any = !o ? { cls: null, range: null } : mode === 'bc' ? { cls: o.usable !== false && o.net_low != null ? `Net ${o.net_low}-${o.net_high} in (est.)` : null, range: 'Estimate only. Not an official score.' } : classify(o); if (o) { o.rule = k.rule || null; o.conf_detail = confDetail(o, mode); } return { ...r, ...k, conf: o ? conf(o, mode) : null }; });
+  await q('delete from model_runs where scan_id=$1 and truth_class is null', [s.id]);
+  for (const r of scored) await q('insert into model_runs(scan_id,provider,model,result,class,confidence,latency_ms,error) values($1,$2,$3,$4,$5,$6,$7,$8)', [s.id, r.provider, r.model, r.result || null, r.cls, r.conf, r.ms, r.error || null]);
+  const good = scored.filter(r => r.cls).sort((a, b) => b.conf - a.conf), best = good[0] || scored.find(r => r.result);
+  if (!best) { await q('update scans set flags=$1 where id=$2', [{ usable: false, error: true, missing: [], issues: ['The analysis service did not respond. Your photos are saved: tap Retry.'] }, s.id]); return { error: 'analysis_failed' }; }
+  const o = best.result, flags = { usable: !!best.cls, missing: o.missing || [], issues: o.issues || [] }, cf = best.conf;
+  const [n] = await q('update scans set class=$1,range=$2,confidence=$3,observations=$4,flags=$5,model=$6 where id=$7 returning *', [best.cls, best.range, cf, o, flags, best.model, s.id]);
+  if (flags.usable && !s.counted) { await q('update users set scans_used=scans_used+1 where id=$1', [u.id]); await q('update scans set counted=true where id=$1', [s.id]);
+    if (u.prefs?.results_email) emailScan(n, [u.email, ...(u.prefs.extra_emails || [])], u).catch(() => {}); }
+  return { scan: n, needs_more: !flags.usable || cf < 75 };
+}
+const fail = (c: any, r: any, id: string) => c.json({ error: r.error, scan_id: id }, r.error === 'analysis_unavailable' ? 503 : 502);
 app.post('/api/scans', auth, async c => {
-  const u = c.get('user'); if (!canScan(u)) return c.json({ error: u.email_verified_at ? 'subscription_required' : 'verify_required' }, 402);
+  const u = c.get('user'); if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);
   const f: any = await c.req.parseBody({ all: true }), mode = f.mode, files = [].concat(f.photos || []);
   if (!['jaw', 'deer', 'bc'].includes(mode) || !files.length || files.length > 8) return c.json({ error: 'invalid_input' }, 400);
   let buck = null; if (f.buck_id) { [buck] = await q('select id from bucks where id=$1 and user_id=$2', [f.buck_id, u.id]); if (!buck) return c.json({ error: 'not_found' }, 404); }
-  const imgs: any[] = [], keys: string[] = [];
-  for (const file of files as any[]) { if (!file.type?.startsWith('image/') || file.size > 12e6) return c.json({ error: 'bad_image' }, 400);
-    const buf = Buffer.from(await file.arrayBuffer()), key = `${u.id}/${crypto.randomUUID()}`; await s3.write(key, buf, { type: file.type }); keys.push(key); imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
-  const all = configured(); if (!all.length) return c.json({ error: 'analysis_unavailable' }, 503);
-  const pick = (await getSetting('compare_all')) === 'false' ? [all.includes(env.PRIMARY_MODEL!) ? env.PRIMARY_MODEL! : all[0]] : all;
-  const runs = await Promise.all(pick.map(p => runModel(p, imgs, mode)));
-  const scored = runs.map((r: any) => { const o = r.result, k = !o ? { cls: null, range: null } : mode === 'bc' ? { cls: o.usable !== false && o.net_low != null ? `Net ${o.net_low}-${o.net_high} in (est.)` : null, range: 'Estimate only. Not an official score.' } : classify(o); return { ...r, ...k, conf: o ? conf(o, mode) : null }; });
-  const good = scored.filter(r => r.cls).sort((a, b) => b.conf - a.conf), best = good[0] || scored.find(r => r.result);
-  if (!best) return c.json({ error: 'analysis_failed' }, 502);
-  const o = best.result, flags = { usable: !!best.cls, missing: o.missing || [], issues: o.issues || [] }, cf = best.conf;
-  const [s] = await q('insert into scans(user_id,buck_id,mode,class,range,confidence,observations,flags,model) values($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *', [u.id, buck?.id || null, mode, best.cls, best.range, cf, o, flags, best.model]);
-  for (const [i, k] of keys.entries()) await q('insert into photos(scan_id,s3_key,slot) values($1,$2,$3)', [s.id, k, i]);
-  for (const r of scored) await q('insert into model_runs(scan_id,provider,model,result,class,confidence,latency_ms,error) values($1,$2,$3,$4,$5,$6,$7,$8)', [s.id, r.provider, r.model, r.result || null, r.cls, r.conf, r.ms, r.error || null]);
-  if (flags.usable) { await q('update users set scans_used=scans_used+1 where id=$1', [u.id]);
-    if (u.prefs?.results_email) { const to = [u.email, ...(u.prefs.extra_emails || [])]; emailScan(s, to, u).catch(() => {}); } }
-  return c.json({ ...(await report(s)), buck_id: buck?.id || null, needs_more_photos: !flags.usable || cf < 75 });
+  const imgs: any[] = [], stored: any[] = [];
+  for (const file of files as any[]) { if (!file.type?.startsWith('image/')) return c.json({ error: 'bad_image' }, 400); if (file.size > 4.9e6) return c.json({ error: 'photo_too_large' }, 413); // AI vision limit is about 5 MB per photo
+    const buf = Buffer.from(await file.arrayBuffer()), h = sha(buf.toString('latin1')).slice(0, 24), key = `${u.id}/${h}.jpg`; // content-addressed: identical photos are stored once per user
+    try { if (!(await s3.file(key).exists())) await s3.write(key, buf, { type: file.type }); } catch (e: any) { console.error('s3 write failed', e.message); return c.json({ error: 'storage_failed' }, 502); }
+    stored.push({ key, bytes: buf.length, sha: h }); imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
+  const [s] = await q('insert into scans(user_id,buck_id,mode,flags) values($1,$2,$3,$4) returning *', [u.id, buck?.id || null, mode, { usable: false, pending: true }]); // saved before analysis so photos are never orphaned
+  for (const [i, p] of stored.entries()) await q('insert into photos(scan_id,s3_key,slot,bytes,sha) values($1,$2,$3,$4,$5)', [s.id, p.key, i, p.bytes, p.sha]);
+  const r: any = await runAnalysis(s, u, imgs); if (r.error) return fail(c, r, s.id);
+  return c.json({ ...(await report(r.scan)), buck_id: buck?.id || null, needs_more_photos: r.needs_more });
 });
+app.post('/api/scans/:id/reanalyze', auth, gate, async c => { const u = c.get('user'), s = await mine(c); if (!s) return c.json({ error: 'not_found' }, 404); if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);
+  const ph = await q('select s3_key from photos where scan_id=$1 order by slot', [s.id]); if (!ph.length) return c.json({ error: 'no_photos' }, 400);
+  const imgs = await Promise.all(ph.map(async (p: any) => ({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') })));
+  const r: any = await runAnalysis(s, u, imgs); if (r.error) return fail(c, r, s.id); return c.json({ ...(await report(r.scan)), buck_id: s.buck_id, needs_more_photos: r.needs_more }); });
 async function shareToken(s: any) { if (s.share_token) return s.share_token; const t = crypto.randomBytes(16).toString('hex'); await q('update scans set share_token=$1 where id=$2', [t, s.id]); return t; }
 async function emailScan(s: any, to: string[], u: any) { const t = await shareToken(s), url = `${env.APP_URL}/s/${t}`;
   for (const a of to) await mail(a, `Deer Ager result: ${s.class || 'Unclear'}`, `<p>${eh(u.first_name)} shared a Deer Ager result.</p><p style="font-size:22px"><b>${eh(s.class || 'Unclear')}</b> <span style="color:#666">${eh(s.range || '')}</span></p><p>Confidence: ${s.confidence ?? '-'}%</p>${btn(url, 'View full printable report')}`, 'result'); }
@@ -195,7 +222,8 @@ app.get('/api/scans/:id', auth, gate, async c => { const s = await mine(c); if (
   return c.json({ ...(await report(s)), notes: s.notes, buck_id: s.buck_id, photos: ph.map((p: any) => s3.file(p.s3_key).presign({ expiresIn: 3600 })) }); });
 app.patch('/api/scans/:id', auth, gate, async c => { const { notes, buck_id } = await c.req.json(); if (buck_id && !(await q('select 1 from bucks where id=$1 and user_id=$2', [buck_id, c.get('user').id])).length) return c.json({ error: 'not_found' }, 404);
   await q('update scans set notes=coalesce($1,notes),buck_id=coalesce($2,buck_id) where id=$3 and user_id=$4', [notes == null ? null : String(notes).slice(0, 2000), buck_id || null, c.req.param('id'), c.get('user').id]); return c.json({ ok: true }); });
-app.delete('/api/scans/:id', auth, gate, async c => { await q('delete from scans where id=$1 and user_id=$2', [c.req.param('id'), c.get('user').id]); return c.json({ ok: true }); });
+app.delete('/api/scans/:id', auth, gate, async c => { const s = await mine(c); if (!s) return c.json({ ok: true }); const keys = (await q('select s3_key from photos where scan_id=$1', [s.id])).map((p: any) => p.s3_key);
+  await q('delete from scans where id=$1', [s.id]); for (const k of keys) if (!(await q('select 1 from photos where s3_key=$1 limit 1', [k])).length) await s3.file(k).delete().catch(() => {}); return c.json({ ok: true }); });
 app.post('/api/scans/:id/share', auth, gate, async c => { const s = await mine(c); if (!s) return c.json({ error: 'not_found' }, 404); return c.json({ url: `${env.APP_URL}/s/${await shareToken(s)}` }); });
 app.post('/api/scans/:id/email', auth, gate, async c => { if (limited(c, 'em', 20)) return c.json({ error: 'rate_limited' }, 429); const s = await mine(c); if (!s) return c.json({ error: 'not_found' }, 404);
   const to = [...new Set(((await c.req.json()).to || []).map((x: string) => String(x).trim().toLowerCase()).filter((x: string) => /^\S+@\S+\.\S+$/.test(x)))].slice(0, 5) as string[]; if (!to.length) return c.json({ error: 'invalid_input' }, 400);
@@ -210,7 +238,7 @@ app.get('/api/config', async c => c.json({ stripe_pk: await getSetting('stripe_p
 app.get('/api/plans', async c => c.json(await q("select id,name,price_cents,interval,trial_days,trial_scans from plans where id in ('trial','monthly','annual') and active")));
 async function priceFor(st: Stripe, p: any) { if (p.stripe_price_id) return p.stripe_price_id;
   const pr = await st.prices.create({ unit_amount: p.price_cents, currency: 'usd', recurring: { interval: p.interval }, product_data: { name: 'Deer Ager ' + p.name } }); await q('update plans set stripe_price_id=$1 where id=$2', [pr.id, p.id]); return pr.id; }
-app.post('/api/billing/checkout', auth, async c => { const u = c.get('user'); if (!u.email_verified_at) return c.json({ error: 'verify_required' }, 403); const st = await getStripe(); if (!st) return c.json({ error: 'billing_not_configured' }, 503);
+app.post('/api/billing/checkout', auth, async c => { const u = c.get('user'); const st = await getStripe(); if (!st) return c.json({ error: 'billing_not_configured' }, 503);
   const { plan } = await c.req.json(); const [p] = await q("select * from plans where id=$1 and id in ('monthly','annual') and active", [plan]); if (!p) return c.json({ error: 'invalid_input' }, 400);
   const [tr] = await q("select trial_days from plans where id='trial'");
   try { let cust = u.stripe_customer; if (!cust) { cust = (await st.customers.create({ email: u.email, name: `${u.first_name} ${u.last_name}`, phone: u.phone, address: { line1: u.address, city: u.city, state: u.state, postal_code: u.zip, country: 'US' }, metadata: { uid: u.id } })).id; await q('update users set stripe_customer=$1 where id=$2', [cust, u.id]); }
@@ -226,7 +254,7 @@ async function applySub(sub: any) {
   const price = sub.items?.data?.[0]?.price?.id, [p] = price ? await q('select id from plans where stripe_price_id=$1', [price]) : [], pid = p?.id || u.plan_id;
   const ended = ['canceled', 'incomplete_expired'].includes(sub.status), status = ended ? 'canceled' : sub.status;
   await q('update users set stripe_customer=$1,stripe_sub=$2,sub_status=$3,plan_id=$4,cancel_at_end=$5,period_end=to_timestamp($6),lifetime_data=lifetime_data or $7 where id=$8', [sub.customer, sub.id, status, ended ? 'lapsed' : pid, !!sub.cancel_at_period_end, sub.current_period_end || null, pid === 'annual' && !ended, u.id]);
-  if (u.sub_status !== status) { if (wantsBilling(u)) { const m: any = { trialing: ['Your free trial has started', 'Your 7-day free trial is active. Your card will be charged when it ends unless you cancel in Account.'], active: ['Your subscription is active', 'Thanks for subscribing to Deer Ager.'], past_due: ['Payment failed', 'We could not process your payment. Please update your card in Account to keep scanning.'], canceled: ['Your subscription has ended', 'You can no longer scan new deer. ' + (pid === 'annual' || u.lifetime_data ? 'Your saved data stays available.' : 'Your saved data returns if you resubscribe.')] }; if (m[status]) await mail(u.email, m[status][0], `<p>Hi ${eh(u.first_name)},</p><p>${m[status][1]}</p>${btn(env.APP_URL!, 'Open Deer Ager')}`, 'billing'); } }
+  if (u.sub_status !== status) { if (wantsBilling(u)) { const m: any = { trialing: ['Your free trial has started', 'Your free trial is active. Your card will be charged when it ends unless you cancel in Account.'], active: ['Your subscription is active', 'Thanks for subscribing to Deer Ager.'], past_due: ['Payment failed', 'We could not process your payment. Please update your card in Account to keep scanning.'], canceled: ['Your subscription has ended', 'You can no longer scan new deer. ' + (pid === 'annual' || u.lifetime_data ? 'Your saved data stays available.' : 'Your saved data returns if you resubscribe.')] }; if (m[status]) await mail(u.email, m[status][0], `<p>Hi ${eh(u.first_name)},</p><p>${m[status][1]}</p>${btn(env.APP_URL!, 'Open Deer Ager')}`, 'billing'); } }
 }
 app.post('/api/webhooks/stripe', async c => { const st = await getStripe(), wh = await getSetting('stripe_webhook_secret'); if (!st || !wh) return c.text('not configured', 503);
   let e: any; try { e = await st.webhooks.constructEventAsync(await c.req.text(), c.req.header('stripe-signature') || '', wh); } catch { return c.text('bad signature', 400); }
@@ -241,10 +269,36 @@ const A = new Hono(); A.use('*', auth, admin);
 const USERCOLS = 'id,email,first_name,last_name,address,city,state,zip,phone,role,status,plan_id,sub_status,cancel_at_end,period_end,lifetime_data,scans_used,email_verified_at,trial_start,created_at,stripe_customer';
 A.get('/stats', async c => { const n = async (w: string) => (await q(`select count(*)::int n from users ${w}`))[0].n;
   const [m] = await q("select coalesce(sum(case when plan_id='monthly' then p.price_cents when plan_id='annual' then p.price_cents/12.0 end),0)::int mrr from users u join plans p on p.id=u.plan_id where u.sub_status='active'");
-  return c.json({ users: await n(''), trials: await n("where sub_status='trialing'"), subscribers: await n("where sub_status='active'"), past_due: await n("where sub_status='past_due'"), unverified: await n('where email_verified_at is null'), scans: (await q('select count(*)::int n from scans'))[0].n, scans_7d: (await q("select count(*)::int n from scans where created_at>now()-interval '7 days'"))[0].n, flagged_rate: +(await q("select coalesce(avg((not (flags->>'usable')::bool)::int),0) r from scans"))[0].r, mrr_cents: m.mrr }); });
-A.get('/drill/:kind', async c => { const k = c.req.param('kind'); const W: any = { users: '', trials: "where sub_status='trialing'", subscribers: "where sub_status='active'", past_due: "where sub_status='past_due'", unverified: 'where email_verified_at is null' };
+  return c.json({ users: await n(''), trials: await n("where sub_status='trialing'"), subscribers: await n("where sub_status='active'"), comped: await n("where sub_status='comped'"), past_due: await n("where sub_status='past_due'"), unverified: await n('where email_verified_at is null'), scans: (await q('select count(*)::int n from scans'))[0].n, scans_7d: (await q("select count(*)::int n from scans where created_at>now()-interval '7 days'"))[0].n, flagged_rate: +(await q("select coalesce(avg((not (flags->>'usable')::bool)::int),0) r from scans"))[0].r, mrr_cents: m.mrr }); });
+A.get('/drill/:kind', async c => { const k = c.req.param('kind'); const W: any = { users: '', trials: "where sub_status='trialing'", subscribers: "where sub_status='active'", comped: "where sub_status='comped'", past_due: "where sub_status='past_due'", unverified: 'where email_verified_at is null' };
   if (k === 'scans') return c.json(await q("select u.id,u.email,u.first_name,u.last_name,count(s.id)::int scans,count(*) filter (where not (s.flags->>'usable')::bool)::int flagged,max(s.created_at) last_scan from users u join scans s on s.user_id=u.id group by u.id order by scans desc limit 200"));
   if (!(k in W)) return c.json({ error: 'not_found' }, 404); return c.json(await q(`select ${USERCOLS} from users ${W[k]} order by created_at desc limit 500`)); });
+A.post('/users', async c => { const b = await c.req.json(), email = String(b.email || '').trim().toLowerCase();
+  if (!/^\S+@\S+\.\S+$/.test(email) || !String(b.first_name || '').trim() || !String(b.last_name || '').trim()) return c.json({ error: 'invalid_input' }, 400);
+  if (b.password && String(b.password).length < 10) return c.json({ error: 'weak_password' }, 400);
+  const pw = b.password ? String(b.password) : crypto.randomBytes(18).toString('hex');
+  try { const [u] = await q("insert into users(email,pw,first_name,last_name,address,city,state,zip,phone,plan_id,sub_status,email_verified_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,'free','comped',now()) returning *", [email, bcrypt.hashSync(pw, 12), ...FIELDS.map(f => String(b[f] || '').trim().slice(0, 120))]);
+    let link = null; if (!b.password) { link = await makeReset(u, 168); await mail(u.email, 'Your Deer Ager access', `<p>Hi ${eh(u.first_name)}, you've been given free access to Deer Ager. Set your password to get started.</p>${btn(link, 'Set your password')}`, 'invite'); }
+    await audit(c.get('user').id, 'admin_create_user', { target: u.id }); return c.json({ ok: true, id: u.id, invite_link: link }); } catch { return c.json({ error: 'email_taken' }, 409); } });
+A.post('/users/:id/grant', async c => { const { on } = await c.req.json(), id = c.req.param('id'), [u] = await q('select sub_status from users where id=$1', [id]); if (!u) return c.json({ error: 'not_found' }, 404);
+  if (on) { if (['active', 'trialing'].includes(u.sub_status)) return c.json({ error: 'has_subscription' }, 409); await q("update users set plan_id='free',sub_status='comped' where id=$1", [id]); }
+  else await q("update users set plan_id='trial',sub_status='none' where id=$1 and sub_status='comped'", [id]);
+  await audit(c.get('user').id, on ? 'grant_free' : 'revoke_free', { target: id }); return c.json({ ok: true }); });
+A.get('/analytics', async c => { const d = Math.min(Math.max(+(c.req.query('days') || 30), 1), 365), w = 'at>now()-($1||\' days\')::interval';
+  const one = async (t: string) => (await q(t, [String(d)]))[0];
+  return c.json({ days: d, views: (await one(`select count(*)::int n from visits where ${w}`)).n, visitors: (await one(`select count(distinct visitor)::int n from visits where ${w}`)).n,
+    signups: (await one("select count(*)::int n from users where created_at>now()-($1||' days')::interval and role='user'")).n, converted: (await one("select count(*)::int n from users where created_at>now()-($1||' days')::interval and role='user' and sub_status in ('trialing','active')")).n,
+    daily: await q(`select to_char(date_trunc('day',at),'Mon DD') as day,count(*)::int views,count(distinct visitor)::int visitors from visits where ${w} group by date_trunc('day',at) order by date_trunc('day',at)`, [String(d)]),
+    sources: await q(`select coalesce(nullif(utm_source,''),nullif(ref,''),'direct') src,count(distinct visitor)::int visitors from visits where landing and ${w} group by 1 order by 2 desc limit 15`, [String(d)]),
+    pages: await q(`select path,count(*)::int views from visits where ${w} group by 1 order by 2 desc limit 15`, [String(d)]),
+    devices: await q(`select coalesce(device,'unknown') k,count(distinct visitor)::int n from visits where ${w} group by 1 order by 2 desc`, [String(d)]),
+    countries: await q(`select country k,count(distinct visitor)::int n from visits where country is not null and ${w} group by 1 order by 2 desc limit 10`, [String(d)]) }); });
+A.get('/system', async c => { const r: any = {}, ok = (v: boolean, note = '') => ({ ok: v, note });
+  try { await q('select 1'); r.database = ok(true); } catch (e: any) { r.database = ok(false, e.message); }
+  try { const k = `healthcheck/${Date.now()}`; await s3.write(k, 'ok', { type: 'text/plain' }); const back = await s3.file(k).text(); await s3.file(k).delete(); r.photo_storage = ok(back === 'ok', 'write, read and delete worked'); } catch (e: any) { r.photo_storage = ok(false, 'Check the S3_* variables: ' + String(e.message).slice(0, 120)); }
+  r.app_url = ok(/^https:\/\//.test(env.APP_URL || ''), env.APP_URL || 'APP_URL is not set');
+  r.stripe_secret_key = ok(!!(await getSetting('stripe_secret_key')), 'Add it in Settings'); r.stripe_webhook = ok(!!(await getSetting('stripe_webhook_secret')), 'Use "Create webhook automatically"');
+  r.email_resend = ok(!!(await getSetting('resend_api_key')), 'Emails are only logged until a Resend key is added'); const m = configured(); r.ai_models = ok(m.length > 0, m.length ? m.join(', ') : 'Set an API key and MODEL_* id'); return c.json(r); });
 A.get('/users', async c => c.json(await q(`select ${USERCOLS} from users order by created_at desc limit 500`)));
 A.get('/users/:id', async c => { const id = c.req.param('id'), [u] = await q(`select ${USERCOLS},prefs from users where id=$1`, [id]); if (!u) return c.json({ error: 'not_found' }, 404);
   return c.json({ user: u, scans: await q('select s.id,s.mode,s.class,s.confidence,s.flags,s.created_at,b.name buck from scans s left join bucks b on b.id=s.buck_id where s.user_id=$1 order by s.created_at desc limit 100', [id]), bucks: await q('select * from bucks where user_id=$1 order by created_at desc', [id]), emails: await q('select kind,subject,status,at from email_log where to_addr=(select email from users where id=$1) order by at desc limit 20', [id]) }); });
