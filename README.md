@@ -13,6 +13,8 @@ Photo step: take a photo or upload (every photo prompt offers both); one photo i
 Each result shows: the age estimate, a chance for each age (0.5 through 6.5+), the confidence and why it is limited, why the AI reached the result, the tooth/body features it saw, other ages considered, photo notes, and what would firm it up.
 **Hunting rules.** Hunters can save up to 8 rule sets (public land, club/lease, private): minimum age, points, inside spread, net B&C, season buck limit, does-first, legal antler rule and notes. The active set drives the "Can I shoot him?" card and a Shooter check on each buck (meets / doesn't meet / need more info). Bucks also record property type, property name and status (watching/passed/harvested).
 
+**B&C score sheet.** Tape measurements saved on a buck produce a printable sheet laid out like the official typical-whitetail chart (points, spreads, main beams, G and H measurements, differences, gross and net). It prints or saves as PDF, emails, texts or shares as a link (`/b/<token>?sheet=bc`), and always says it is an estimate, not an official score, with blank lines for the official measurer.
+
 **Partner API.** Other apps (such as hunting club software) can run scans through `/api/v1` with a per-partner key, hosted capture links, signed webhooks and member transfers, so deer follow the member between clubs. Admins manage partners in Admin > Partners. Full guide: `docs/INTEGRATION.md`. Club, member and season management stay in the partner app.
 
 **Share links** (scan `/s/…` and buck sheet `/b/…`) include the photos. Photos are served through the link itself, so they keep working as long as the link does and nothing else in the bucket is exposed.
