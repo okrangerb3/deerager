@@ -37,7 +37,10 @@ const cols = ['first_name text', 'last_name text', 'address text', 'city text', 
 for (const c of cols) await db.query(`alter table users add column if not exists ${c}`);
 await db.query('alter table scans add column if not exists buck_id uuid references bucks(id) on delete set null');
 await db.query('alter table model_runs add column if not exists confidence int');
-await db.query('alter table bucks add column if not exists points int'); await db.query('alter table bucks add column if not exists share_token text'); await db.query('alter table bucks add column if not exists property_kind text'); await db.query('alter table bucks add column if not exists property_name text'); await db.query("alter table bucks add column if not exists status text default 'watching'"); await db.query('alter table scans add column if not exists truth_age text'); await db.query('create table if not exists buck_shares(buck_id uuid references bucks(id) on delete cascade,to_user uuid references users(id) on delete cascade,created_at timestamptz default now(),primary key(buck_id,to_user))'); await db.query("create table if not exists buck_photos(id uuid primary key default gen_random_uuid(),buck_id uuid references bucks(id) on delete cascade,s3_key text not null,kind text default 'other',caption text,bytes int,created_at timestamptz default now())");
+await db.query('alter table bucks add column if not exists points int'); await db.query('alter table bucks add column if not exists share_token text');
+await db.query("create table if not exists partners(id uuid primary key default gen_random_uuid(),name text not null,key_hash text unique not null,key_prefix text,user_id uuid,webhook_url text,webhook_secret text,monthly_limit int default 500,active bool default true,created_at timestamptz default now())");
+await db.query("create table if not exists capture_links(token text primary key,partner_id uuid references partners(id) on delete cascade,mode text,ext jsonb,return_url text,expires_at timestamptz,used int default 0,max_uses int default 3,created_at timestamptz default now())");
+await db.query('alter table scans add column if not exists partner_id uuid'); await db.query('alter table scans add column if not exists ext jsonb'); await db.query('create index if not exists scans_partner on scans(partner_id,created_at)'); await db.query('alter table bucks add column if not exists property_kind text'); await db.query('alter table bucks add column if not exists property_name text'); await db.query("alter table bucks add column if not exists status text default 'watching'"); await db.query('alter table scans add column if not exists truth_age text'); await db.query('create table if not exists buck_shares(buck_id uuid references bucks(id) on delete cascade,to_user uuid references users(id) on delete cascade,created_at timestamptz default now(),primary key(buck_id,to_user))'); await db.query("create table if not exists buck_photos(id uuid primary key default gen_random_uuid(),buck_id uuid references bucks(id) on delete cascade,s3_key text not null,kind text default 'other',caption text,bytes int,created_at timestamptz default now())");
 await db.query('alter table photos add column if not exists bytes int'); await db.query('alter table photos add column if not exists sha text'); await db.query('alter table scans add column if not exists counted bool default false');
 if ((await q("insert into settings(key,value) values('migr_trial_1day','1') on conflict do nothing returning key")).length) await q("update plans set trial_days=1 where id='trial'"); // one-time: 1-day trial
 if (env.ADMIN_EMAIL && env.ADMIN_PASSWORD) await db.query("insert into users(email,pw,role,first_name,last_name,email_verified_at) values($1,$2,'admin','Admin','User',now()) on conflict(email) do update set role='admin',email_verified_at=coalesce(users.email_verified_at,now())", [env.ADMIN_EMAIL.toLowerCase(), bcrypt.hashSync(env.ADMIN_PASSWORD, 12)]);
@@ -273,9 +276,9 @@ async function runAnalysis(s: any, u: any, imgs: any[]) {
   return { scan: n, needs_more: !flags.usable || cf < 75 };
 }
 const fail = (c: any, r: any, id: string) => c.json({ error: r.error, scan_id: id }, r.error === 'analysis_unavailable' ? 503 : 502);
-app.post('/api/scans', auth, async c => {
-  const u = c.get('user'); if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);
-  const f: any = await c.req.parseBody({ all: true }), mode = f.mode, files = [].concat(f.photos || []);
+async function ingest(c: any, u: any, x: any = {}): Promise<any> {
+  if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);
+  const f: any = await c.req.parseBody({ all: true }), mode = x.mode || f.mode, files = [].concat(f.photos || []);
   if (!['jaw', 'deer', 'bc'].includes(mode) || !files.length || files.length > 8) return c.json({ error: 'invalid_input' }, 400);
   let buck = null; if (f.buck_id) { [buck] = await q('select id from bucks where id=$1 and user_id=$2', [f.buck_id, u.id]); if (!buck) return c.json({ error: 'not_found' }, 404); }
   const imgs: any[] = [], stored: any[] = []; let storageDown = false;
@@ -283,11 +286,12 @@ app.post('/api/scans', auth, async c => {
     const buf = Buffer.from(await file.arrayBuffer()), h = sha(buf.toString('latin1')).slice(0, 24), key = `${u.id}/${h}.jpg`; // content-addressed: identical photos are stored once per user
     try { if (!(await s3.file(key).exists())) await s3.write(key, buf, { type: file.type }); stored.push({ key, bytes: buf.length, sha: h }); } catch (e: any) { console.error('s3 write failed', e.message); storageDown = true; } // keep going: the analysis still works from memory
     ; imgs.push({ mime: file.type, b64: buf.toString('base64') }); }
-  const [s] = await q('insert into scans(user_id,buck_id,mode,flags) values($1,$2,$3,$4) returning *', [u.id, buck?.id || null, mode, { usable: false, pending: true }]); // saved before analysis so photos are never orphaned
+  const [s] = await q('insert into scans(user_id,buck_id,mode,flags,partner_id,ext) values($1,$2,$3,$4,$5,$6) returning *', [u.id, buck?.id || null, mode, { usable: false, pending: true }, x.partner_id || null, x.ext || null]); // saved before analysis so photos are never orphaned
   for (const [i, p] of stored.entries()) await q('insert into photos(scan_id,s3_key,slot,bytes,sha) values($1,$2,$3,$4,$5)', [s.id, p.key, i, p.bytes, p.sha]);
   const r: any = await runAnalysis(s, u, imgs); if (r.error) return fail(c, r, s.id);
-  return c.json({ ...(await report(r.scan)), buck_id: buck?.id || null, needs_more_photos: r.needs_more, storage_down: storageDown });
-});
+  return { scan: r.scan, out: { ...(await report(r.scan)), buck_id: buck?.id || null, needs_more_photos: r.needs_more, storage_down: storageDown } };
+}
+app.post('/api/scans', auth, async c => { const r = await ingest(c, c.get('user')); return r instanceof Response ? r : c.json(r.out); });
 app.post('/api/scans/:id/reanalyze', auth, gate, async c => { const u = c.get('user'), s = await mine(c); if (!s) return c.json({ error: 'not_found' }, 404); if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);
   const ph = await q('select s3_key from photos where scan_id=$1 order by slot', [s.id]); if (!ph.length) return c.json({ error: 'no_photos' }, 400);
   const imgs = await Promise.all(ph.map(async (p: any) => ({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') })));
@@ -311,6 +315,68 @@ app.get('/api/share/:t', async c => { const [s] = await q('select * from scans w
   return c.json({ ...(await report(s)), photos: ph.map((p: any) => `/api/share/${c.req.param('t')}/p/${p.slot}`) }); }); // photos included (served via this link only), no personal data
 app.get('/api/share/:t/p/:slot', async c => { const [s] = await q('select id from scans where share_token=$1', [c.req.param('t')]); const [p] = s ? await q('select s3_key from photos where scan_id=$1 and slot=$2', [s.id, +c.req.param('slot') || 0]) : []; return p ? photoResp(p.s3_key) : c.json({ error: 'not_found' }, 404); });
 app.post('/api/bc', auth, async c => c.json(bc(await c.req.json())));
+
+// ---------- partner API (hunting-club software, outfitters, etc.): /api/v1 with a Bearer dk_… key, hosted capture links, webhooks
+function rulesEval(rules: any, o: any, ext: any) {
+  const checks: any[] = [], rl = rules || {}, d = o?.dist, num = (v: any) => (v === '' || v == null || !Number.isFinite(+v) ? null : +v);
+  if (num(rl.min_age) != null) { const pct = d ? Math.round(AGES.filter(a => parseFloat(a) >= +rl.min_age).reduce((t, a) => t + (+d.probs?.[a] || 0), 0)) : null;
+    checks.push({ rule: 'min_age', required: +rl.min_age, status: pct == null ? 'unknown' : pct >= 70 ? 'yes' : pct <= 30 ? 'no' : 'unsure', chance_pct: pct }); }
+  for (const [k, f] of [['min_points', 'points'], ['min_spread', 'spread'], ['min_net', 'net']] as const) if (num(rl[k]) != null) { const v = num(ext?.[f]); checks.push({ rule: k, required: +rl[k], value: v, status: v == null ? 'unknown' : v >= +rl[k] ? 'yes' : 'no' }); }
+  const meets = !checks.length ? null : checks.some(c => c.status === 'no') ? 'no' : checks.every(c => c.status === 'yes') ? 'yes' : 'unsure';
+  return { meets, checks, notes: ['antler_rule', 'season_limit', 'does_first', 'notes'].filter(k => rl[k]).map(k => `${k}: ${rl[k]}`) };
+}
+async function v1scan(s: any) {
+  const o = s.observations || {}, ext = s.ext || {}, d = o.dist, t = await shareToken(s);
+  return { id: s.id, mode: s.mode, status: s.flags?.pending ? 'pending' : 'complete', created_at: s.created_at, class: s.class, range: s.range, confidence: s.confidence, usable: !!s.flags?.usable,
+    age: d ? { best: d.best, low: d.lo, high: d.hi, probabilities: d.probs } : null, antler_estimate: s.mode === 'bc' ? { net_low: o.net_low ?? null, net_high: o.net_high ?? null } : undefined,
+    needs_more_photos: !s.flags?.usable || (s.confidence ?? 0) < 75, issues: s.flags?.issues || [], missing: s.flags?.missing || [], reasoning: o.reasoning || null,
+    rules: ext.rules ? rulesEval(ext.rules, o, ext) : null, member_id: ext.member_id || null, deer_id: ext.deer_id || null, club_id: ext.club_id || null, points: ext.points ?? null,
+    report_url: `${env.APP_URL}/s/${t}`, disclaimer: 'Estimate only. Tooth-wear aging is subjective; a lab cementum test is the gold standard.' };
+}
+const clip = (v: any, n = 100) => (v == null || v === '' ? undefined : String(v).slice(0, n));
+function extFrom(b: any) {
+  let rules: any = b.rules; if (typeof rules === 'string') { try { rules = JSON.parse(rules); } catch { rules = null; } }
+  const num = (v: any, lo: number, hi: number) => (v === '' || v == null || !Number.isFinite(+v) ? undefined : Math.max(lo, Math.min(hi, +v)));
+  const r = rules && typeof rules === 'object' ? { min_age: [2.5, 3.5, 4.5, 5.5, 6.5].includes(+rules.min_age) ? +rules.min_age : undefined, min_points: num(rules.min_points, 0, 30), min_spread: num(rules.min_spread, 0, 40), min_net: num(rules.min_net, 0, 300), antler_rule: clip(rules.antler_rule, 200), season_limit: num(rules.season_limit, 0, 20), does_first: num(rules.does_first, 0, 20), notes: clip(rules.notes, 500) } : null;
+  const ext: any = { member_id: clip(b.member_id), deer_id: clip(b.deer_id), club_id: clip(b.club_id), points: num(b.points, 0, 40), spread: num(b.spread, 0, 40), net: num(b.net, 0, 300), rules: r && Object.values(r).some(v => v != null) ? r : undefined };
+  for (const k of Object.keys(ext)) if (ext[k] === undefined) delete ext[k]; return ext;
+}
+async function fireHook(p: any, event: string, data: any) {
+  if (!p.webhook_url) return; const body = JSON.stringify({ id: 'evt_' + crypto.randomUUID(), type: event, created: Math.floor(Date.now() / 1000), data }), ts = Math.floor(Date.now() / 1000), sig = crypto.createHmac('sha256', p.webhook_secret || '').update(`${ts}.${body}`).digest('hex');
+  for (let i = 0; i < 2; i++) { try { const r = await fetch(p.webhook_url, { method: 'POST', headers: { 'content-type': 'application/json', 'deerager-signature': `t=${ts},v1=${sig}` }, body, signal: AbortSignal.timeout(8000) }); await audit(null, 'partner_webhook', { partner: p.id, event, status: r.status }); if (r.ok) return; } catch (e: any) { await audit(null, 'partner_webhook', { partner: p.id, event, error: String(e.message).slice(0, 100) }); } if (!i) await new Promise(r => setTimeout(r, 5000)); }
+}
+const partnerUser = async (p: any) => (await q("select u.*,(select trial_scans from plans where id='trial') trial_scans from users u where u.id=$1", [p.user_id]))[0];
+const monthUsed = async (p: any) => (await q("select count(*)::int n from scans where partner_id=$1 and created_at>=date_trunc('month',now())", [p.id]))[0].n;
+const V1 = new Hono();
+V1.use('*', async (c: any, next: any) => { const k = (c.req.header('authorization') || '').replace(/^Bearer /, '').trim(); const [p] = k.startsWith('dk_') ? await q('select * from partners where key_hash=$1 and active', [sha(k)]) : [];
+  if (!p) return c.json({ error: 'unauthorized' }, 401); const u = await partnerUser(p); if (!u) return c.json({ error: 'unauthorized' }, 401); c.set('partner', p); c.set('user', u); await next(); });
+V1.get('/me', async c => { const p = c.get('partner'); return c.json({ name: p.name, monthly_limit: p.monthly_limit, used_this_month: await monthUsed(p) }); });
+async function partnerScan(c: any, p: any, u: any, x: any) {
+  if (p.monthly_limit && (await monthUsed(p)) >= p.monthly_limit) return c.json({ error: 'limit_reached' }, 429);
+  const r = await ingest(c, u, { ...x, partner_id: p.id }); if (r instanceof Response) return r;
+  const out = await v1scan((await q('select * from scans where id=$1', [r.scan.id]))[0]); fireHook(p, 'scan.completed', out).catch(() => {}); return c.json({ ...out, storage_down: r.out.storage_down });
+}
+V1.post('/scans', async c => { const p = c.get('partner'), f: any = await c.req.parseBody({ all: true }); return partnerScan(c, p, c.get('user'), { ext: extFrom(f) }); });
+V1.get('/scans', async c => { const p = c.get('partner'), w: string[] = ['partner_id=$1'], a: any[] = [p.id];
+  for (const k of ['member_id', 'deer_id', 'club_id']) if (c.req.query(k)) { a.push(c.req.query(k)); w.push(`ext->>'${k}'=$${a.length}`); }
+  const rows = await q(`select * from scans where ${w.join(' and ')} order by created_at desc limit ${Math.min(+(c.req.query('limit') || 50) || 50, 200)}`, a); return c.json({ scans: await Promise.all(rows.map(v1scan)) }); });
+V1.get('/scans/:id', async c => { const [s] = await q('select * from scans where id=$1 and partner_id=$2', [c.req.param('id'), c.get('partner').id]).catch(() => []); return s ? c.json(await v1scan(s)) : c.json({ error: 'not_found' }, 404); });
+V1.patch('/scans/:id', async c => { const b = await c.req.json().catch(() => ({})), [s] = await q('select * from scans where id=$1 and partner_id=$2', [c.req.param('id'), c.get('partner').id]).catch(() => []); if (!s) return c.json({ error: 'not_found' }, 404);
+  const ext = { ...(s.ext || {}), ...extFrom(b) }; await q('update scans set ext=$1 where id=$2', [ext, s.id]); return c.json(await v1scan({ ...s, ext })); });
+// a deer follows its member: move every scan of a member from one club to another
+V1.post('/members/:member/transfer', async c => { const b = await c.req.json().catch(() => ({})), to = clip(b.to_club), from = clip(b.from_club); if (!to) return c.json({ error: 'invalid_input' }, 400);
+  const r = await q(`update scans set ext=jsonb_set(coalesce(ext,'{}'),'{club_id}',to_jsonb($1::text)) where partner_id=$2 and ext->>'member_id'=$3 ${from ? "and ext->>'club_id'=$4" : ''} returning id`, from ? [to, c.get('partner').id, c.req.param('member'), from] : [to, c.get('partner').id, c.req.param('member')]); return c.json({ moved: r.length }); });
+V1.post('/capture-links', async c => { const p = c.get('partner'), b = await c.req.json().catch(() => ({})); if (!['jaw', 'deer', 'bc'].includes(b.mode)) return c.json({ error: 'invalid_input' }, 400);
+  const ru = b.return_url ? String(b.return_url).slice(0, 500) : null; if (ru && !/^https:\/\/[^\s]+$/.test(ru)) return c.json({ error: 'invalid_return_url' }, 400);
+  const t = crypto.randomBytes(18).toString('hex'), hrs = Math.min(Math.max(+b.expires_hours || 24, 1), 168); await q("insert into capture_links(token,partner_id,mode,ext,return_url,expires_at,max_uses) values($1,$2,$3,$4,$5,now()+($6||' hours')::interval,$7)", [t, p.id, b.mode, extFrom(b), ru, String(hrs), Math.min(Math.max(+b.max_uses || 3, 1), 10)]);
+  return c.json({ url: `${env.APP_URL}/c/${t}`, expires_in_hours: hrs }); });
+app.route('/api/v1', V1);
+app.get('/c/:t', c => { c.header('x-robots-tag', 'noindex'); return c.html(HTML); });
+const capLink = async (t: string) => (await q('select l.*,p.name partner_name,p.active from capture_links l join partners p on p.id=l.partner_id where l.token=$1 and l.expires_at>now()', [t]))[0];
+app.get('/api/c/:t', async c => { const l = await capLink(c.req.param('t')); return l && l.active ? c.json({ mode: l.mode, partner: l.partner_name, return_url: l.return_url, left: l.max_uses - l.used }) : c.json({ error: 'not_found' }, 404); });
+app.post('/api/c/:t/scan', async c => { if (limited(c, 'cap', 20)) return c.json({ error: 'rate_limited' }, 429); const l = await capLink(c.req.param('t')); if (!l || !l.active || l.used >= l.max_uses) return c.json({ error: 'link_expired' }, 410);
+  const [p] = await q('select * from partners where id=$1', [l.partner_id]), u = await partnerUser(p); await q('update capture_links set used=used+1 where token=$1', [l.token]);
+  return partnerScan(c, p, u, { mode: l.mode, ext: l.ext || {} }); });
 
 // ---------- billing (Stripe Checkout hosted page keeps card data off our servers: PCI SAQ A)
 let _s: any = { k: null, c: null };
@@ -348,7 +414,7 @@ app.post('/api/webhooks/stripe', async c => { const st = await getStripe(), wh =
 // ---------- admin API
 const A = new Hono(); A.use('*', auth, admin);
 const USERCOLS = 'id,email,first_name,last_name,address,city,state,zip,phone,role,status,plan_id,sub_status,cancel_at_end,period_end,lifetime_data,scans_used,email_verified_at,trial_start,created_at,stripe_customer';
-A.get('/stats', async c => { const n = async (w: string) => (await q(`select count(*)::int n from users ${w}`))[0].n;
+A.get('/stats', async c => { const n = async (w: string) => (await q(`select count(*)::int n from users where email not like 'partner+%' ${w ? 'and ' + w.replace(/^where /, '') : ''}`))[0].n;
   const [m] = await q("select coalesce(sum(case when plan_id='monthly' then p.price_cents when plan_id='annual' then p.price_cents/12.0 end),0)::int mrr from users u join plans p on p.id=u.plan_id where u.sub_status='active'");
   return c.json({ users: await n(''), trials: await n("where sub_status='trialing'"), subscribers: await n("where sub_status='active'"), comped: await n("where sub_status='comped'"), past_due: await n("where sub_status='past_due'"), unverified: await n('where email_verified_at is null'), scans: (await q('select count(*)::int n from scans'))[0].n, scans_7d: (await q("select count(*)::int n from scans where created_at>now()-interval '7 days'"))[0].n, flagged_rate: +(await q("select coalesce(avg((not (flags->>'usable')::bool)::int),0) r from scans"))[0].r, mrr_cents: m.mrr }); });
 A.get('/drill/:kind', async c => { const k = c.req.param('kind'); const W: any = { users: '', trials: "where sub_status='trialing'", subscribers: "where sub_status='active'", comped: "where sub_status='comped'", past_due: "where sub_status='past_due'", unverified: 'where email_verified_at is null' };
@@ -380,7 +446,7 @@ A.get('/system', async c => { const r: any = {}, ok = (v: boolean, note = '') =>
   r.app_url = ok(/^https:\/\//.test(env.APP_URL || ''), env.APP_URL || 'APP_URL is not set');
   r.stripe_secret_key = ok(!!(await getSetting('stripe_secret_key')), 'Add it in Settings'); r.stripe_webhook = ok(!!(await getSetting('stripe_webhook_secret')), 'Use "Create webhook automatically"');
   r.email_resend = ok(!!(await getSetting('resend_api_key')), 'Emails are only logged until a Resend key is added'); const m = configured(); r.ai_models = ok(m.length > 0, m.length ? m.join(', ') : 'Set an API key and MODEL_* id'); return c.json(r); });
-A.get('/users', async c => c.json(await q(`select ${USERCOLS} from users order by created_at desc limit 500`)));
+A.get('/users', async c => c.json(await q(`select ${USERCOLS} from users where email not like 'partner+%' order by created_at desc limit 500`)));
 A.get('/users/:id', async c => { const id = c.req.param('id'), [u] = await q(`select ${USERCOLS},prefs from users where id=$1`, [id]); if (!u) return c.json({ error: 'not_found' }, 404);
   return c.json({ user: u, scans: await q('select s.id,s.mode,s.class,s.confidence,s.flags,s.created_at,b.name buck from scans s left join bucks b on b.id=s.buck_id where s.user_id=$1 order by s.created_at desc limit 100', [id]), bucks: await q('select * from bucks where user_id=$1 order by created_at desc', [id]), emails: await q('select kind,subject,status,at from email_log where to_addr=(select email from users where id=$1) order by at desc limit 20', [id]) }); });
 A.get('/scans/:id', async c => { const [s] = await q('select * from scans where id=$1', [c.req.param('id')]); if (!s) return c.json({ error: 'not_found' }, 404); const ph = await q('select s3_key from photos where scan_id=$1 order by slot', [s.id]);
@@ -422,5 +488,15 @@ A.post('/benchmark/:scanId', async c => { const { truth_class } = await c.req.js
   for (const r of out as any[]) await q('insert into model_runs(scan_id,provider,model,result,class,confidence,latency_ms,error,truth_class) values($1,$2,$3,$4,$5,$6,$7,$8,$9)', [s.id, r.provider, r.model, r.result || null, r.result ? classify(r.result).cls : null, r.result ? conf(r.result, s.mode) : null, r.ms, r.error || null, truth_class || 'unlabeled']); return c.json(out); });
 A.get('/benchmark/summary', async c => c.json(await q("select provider,count(*)::int n,round(avg((class=truth_class)::int)*100) exact_pct,round(avg(latency_ms)) ms from model_runs where truth_class is not null and truth_class<>'unlabeled' and error is null group by 1")));
 A.get('/audit', async c => c.json(await q('select * from audit order by at desc limit 200')));
+const newKey = () => 'dk_live_' + crypto.randomBytes(24).toString('hex');
+A.get('/partners', async c => c.json(await Promise.all((await q('select id,name,key_prefix,webhook_url,monthly_limit,active,created_at,(select count(*)::int from scans where partner_id=partners.id) total from partners order by created_at desc')).map(async (p: any) => ({ ...p, used: await monthUsed(p) })))));
+A.post('/partners', async c => { const b = await c.req.json(), name = String(b.name || '').trim().slice(0, 80); if (!name) return c.json({ error: 'invalid_input' }, 400);
+  const wh = b.webhook_url ? String(b.webhook_url).trim() : null; if (wh && !/^https:\/\/\S+$/.test(wh)) return c.json({ error: 'invalid_webhook' }, 400);
+  const [u] = await q("insert into users(email,pw,first_name,last_name,plan_id,sub_status,email_verified_at) values($1,$2,$3,'(Partner API)','free','comped',now()) returning id", [`partner+${crypto.randomUUID()}@partners.deerager.com`, bcrypt.hashSync(crypto.randomBytes(24).toString('hex'), 10), name.slice(0, 60)]);
+  const key = newKey(), secret = 'whsec_' + crypto.randomBytes(20).toString('hex'); const [p] = await q('insert into partners(name,key_hash,key_prefix,user_id,webhook_url,webhook_secret,monthly_limit) values($1,$2,$3,$4,$5,$6,$7) returning id', [name, sha(key), key.slice(0, 12), u.id, wh, secret, Math.max(0, Math.min(+b.monthly_limit || 0, 1e6))]);
+  await audit(c.get('user').id, 'partner_create', { name }); return c.json({ id: p.id, key, webhook_secret: secret }); });
+A.put('/partners/:id', async c => { const b = await c.req.json(), wh = b.webhook_url ? String(b.webhook_url).trim() : null; if (wh && !/^https:\/\/\S+$/.test(wh)) return c.json({ error: 'invalid_webhook' }, 400);
+  await q('update partners set name=coalesce($1,name),webhook_url=$2,monthly_limit=coalesce($3,monthly_limit),active=coalesce($4,active) where id=$5', [b.name ? String(b.name).slice(0, 80) : null, wh, b.monthly_limit == null ? null : Math.max(0, Math.min(+b.monthly_limit || 0, 1e6)), typeof b.active === 'boolean' ? b.active : null, c.req.param('id')]); await audit(c.get('user').id, 'partner_update', { partner: c.req.param('id') }); return c.json({ ok: true }); });
+A.post('/partners/:id/rotate', async c => { const key = newKey(); const r = await q('update partners set key_hash=$1,key_prefix=$2 where id=$3 returning id', [sha(key), key.slice(0, 12), c.req.param('id')]); if (!r.length) return c.json({ error: 'not_found' }, 404); await audit(c.get('user').id, 'partner_rotate', { partner: c.req.param('id') }); return c.json({ key }); });
 app.route('/api/admin', A);
 export default { port: +(env.PORT || 3000), fetch: app.fetch };
