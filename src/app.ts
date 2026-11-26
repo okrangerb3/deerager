@@ -37,7 +37,7 @@ const cols = ['first_name text', 'last_name text', 'address text', 'city text', 
 for (const c of cols) await db.query(`alter table users add column if not exists ${c}`);
 await db.query('alter table scans add column if not exists buck_id uuid references bucks(id) on delete set null');
 await db.query('alter table model_runs add column if not exists confidence int');
-await db.query('alter table bucks add column if not exists points int'); await db.query("create table if not exists buck_photos(id uuid primary key default gen_random_uuid(),buck_id uuid references bucks(id) on delete cascade,s3_key text not null,kind text default 'other',caption text,bytes int,created_at timestamptz default now())");
+await db.query('alter table bucks add column if not exists points int'); await db.query('alter table bucks add column if not exists share_token text'); await db.query('alter table scans add column if not exists truth_age text'); await db.query('create table if not exists buck_shares(buck_id uuid references bucks(id) on delete cascade,to_user uuid references users(id) on delete cascade,created_at timestamptz default now(),primary key(buck_id,to_user))'); await db.query("create table if not exists buck_photos(id uuid primary key default gen_random_uuid(),buck_id uuid references bucks(id) on delete cascade,s3_key text not null,kind text default 'other',caption text,bytes int,created_at timestamptz default now())");
 await db.query('alter table photos add column if not exists bytes int'); await db.query('alter table photos add column if not exists sha text'); await db.query('alter table scans add column if not exists counted bool default false');
 if ((await q("insert into settings(key,value) values('migr_trial_1day','1') on conflict do nothing returning key")).length) await q("update plans set trial_days=1 where id='trial'"); // one-time: 1-day trial
 if (env.ADMIN_EMAIL && env.ADMIN_PASSWORD) await db.query("insert into users(email,pw,role,first_name,last_name,email_verified_at) values($1,$2,'admin','Admin','User',now()) on conflict(email) do update set role='admin',email_verified_at=coalesce(users.email_verified_at,now())", [env.ADMIN_EMAIL.toLowerCase(), bcrypt.hashSync(env.ADMIN_PASSWORD, 12)]);
@@ -202,6 +202,45 @@ app.put('/api/bucks/:id', auth, gate, async c => { const v = buckVals(await c.re
   const r = await q(`update bucks set ${BUCK.map((k, i) => `${k}=$${i + 3}`).join(',')} where id=$1 and user_id=$2 returning id`, [c.req.param('id'), c.get('user').id, ...v]); return r.length ? c.json({ ok: true }) : c.json({ error: 'not_found' }, 404); });
 app.delete('/api/bucks/:id', auth, gate, async c => { await q('delete from bucks where id=$1 and user_id=$2', [c.req.param('id'), c.get('user').id]); return c.json({ ok: true }); });
 
+// ---------- buck data sheet (view / print / email / text link)
+async function buckSheet(b: any, ttl = 3600) {
+  const sl = await q("select mode,class,range,confidence,created_at,observations->'dist' dist from scans where buck_id=$1 order by created_at desc", [b.id]);
+  const ph = await q('select s3_key,kind from buck_photos where buck_id=$1 order by created_at', [b.id]);
+  const sp = await q('select p.s3_key from photos p join scans s on s.id=p.scan_id where s.buck_id=$1 order by s.created_at desc,p.slot limit 4', [b.id]);
+  const url = (k: string) => s3.file(k).presign({ expiresIn: ttl }), pri = ['rack', 'field', 'mount', 'jawbone', 'other'];
+  const hero = [...ph].sort((x: any, y: any) => pri.indexOf(x.kind) - pri.indexOf(y.kind))[0]?.s3_key || sp[0]?.s3_key || null;
+  const jaw = sl.find((x: any) => x.mode === 'jaw' && x.class) || sl.find((x: any) => x.class);
+  return { name: b.name, points: b.points, hunted_on: b.hunted_on, location: b.location, stand: b.stand, wind_dir: b.wind_dir, temp_f: b.temp_f, rut_phase: b.rut_phase, tactics: b.tactics || [], notes: b.notes, bc: b.bc,
+    age: jaw ? { cls: jaw.class, range: jaw.range, confidence: jaw.confidence, best: jaw.dist?.best || null } : null,
+    scans: sl.filter((x: any) => x.class).map((x: any) => ({ mode: x.mode, cls: x.class, range: x.range, confidence: x.confidence, created_at: x.created_at })),
+    hero: hero ? url(hero) : null, photos: [...ph.map((p: any) => ({ kind: p.kind, url: url(p.s3_key) })), ...sp.map((p: any) => ({ kind: 'scan', url: url(p.s3_key) }))].filter((p: any) => p.url !== (hero ? url(hero) : null)).slice(0, 8) };
+}
+const ownBuck = async (c: any) => (await q('select * from bucks where id=$1 and user_id=$2', [c.req.param('id'), c.get('user').id]))[0];
+app.get('/api/bucks/:id/sheet', auth, gate, async c => { const b = await ownBuck(c); return b ? c.json(await buckSheet(b)) : c.json({ error: 'not_found' }, 404); });
+app.post('/api/bucks/:id/share', auth, gate, async c => { const b = await ownBuck(c); if (!b) return c.json({ error: 'not_found' }, 404); let t = b.share_token; if (!t) { t = crypto.randomBytes(16).toString('hex'); await q('update bucks set share_token=$1 where id=$2', [t, b.id]); } return c.json({ url: `${env.APP_URL}/b/${t}` }); });
+app.get('/api/bshare/:t', async c => { const [b] = await q('select * from bucks where share_token=$1', [c.req.param('t')]); return b ? c.json(await buckSheet(b)) : c.json({ error: 'not_found' }, 404); });
+app.get('/b/:t', c => { c.header('x-robots-tag', 'noindex'); return c.html(HTML); });
+app.post('/api/bucks/:id/email', auth, gate, async c => { if (limited(c, 'em', 20)) return c.json({ error: 'rate_limited' }, 429); const b = await ownBuck(c); if (!b) return c.json({ error: 'not_found' }, 404); const u = c.get('user');
+  const to = [...new Set(((await c.req.json()).to || []).map((x: string) => String(x).trim().toLowerCase()).filter((x: string) => /^\S+@\S+\.\S+$/.test(x)))].slice(0, 5) as string[]; if (!to.length) return c.json({ error: 'invalid_input' }, 400);
+  let t = b.share_token; if (!t) { t = crypto.randomBytes(16).toString('hex'); await q('update bucks set share_token=$1 where id=$2', [t, b.id]); }
+  const sh: any = await buckSheet(b, 604800), link = `${env.APP_URL}/b/${t}`, row = (k: string, v: any) => (v == null || v === '' ? '' : `<tr><td style="color:#777;padding:3px 12px 3px 0">${k}</td><td><b>${eh(v)}</b></td></tr>`);
+  const body = `<table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td valign="top"><h2 style="margin:0">${eh(sh.name)}</h2>${sh.points ? `<div style="font-size:20px;color:#2f6b3f"><b>${sh.points}-point</b></div>` : ''}${sh.age ? `<div style="margin-top:6px">Age: <b>${eh(sh.age.cls)}</b> <span style="color:#777">${eh(sh.age.range || '')}</span></div>` : ''}${sh.bc ? `<div>B&amp;C: <b>${(+sh.bc.net).toFixed(1)}"</b> net (estimate)</div>` : ''}</td>${sh.hero ? `<td width="42%" valign="top" align="right"><img src="${sh.hero}" width="200" style="width:100%;max-width:200px;border-radius:10px;display:block" alt=""></td>` : ''}</tr></table>
+<table cellpadding="0" cellspacing="0" border="0" style="margin-top:12px">${row('Date', sh.hunted_on ? String(sh.hunted_on).slice(0, 10) : '')}${row('Location', sh.location)}${row('Stand', sh.stand)}${row('Wind', sh.wind_dir)}${row('Temp', sh.temp_f != null ? sh.temp_f + ' F' : '')}${row('Rut phase', sh.rut_phase)}${row('Tactics', (sh.tactics || []).join(', '))}</table>${sh.notes ? `<p>${eh(sh.notes)}</p>` : ''}${btn(link, 'View and print the full data sheet')}`;
+  for (const a of to) await mail(a, `${sh.name}${sh.points ? ` (${sh.points}-pt)` : ''}: Deer Ager data sheet`, `<p>${eh(u.first_name)} shared a buck data sheet.</p>` + body, 'buck'); return c.json({ ok: true, sent: to.length }); });
+
+// share a buck sheet with another member of the site
+app.post('/api/bucks/:id/share-member', auth, gate, async c => { if (limited(c, 'sm', 30)) return c.json({ error: 'rate_limited' }, 429); const b = await ownBuck(c); if (!b) return c.json({ error: 'not_found' }, 404); const me = c.get('user');
+  const em = String((await c.req.json().catch(() => ({}))).email || '').trim().toLowerCase(), [t] = await q("select id,first_name,email,prefs from users where email=$1 and status='active'", [em]);
+  if (!t || t.id === me.id) return c.json({ error: 'member_not_found' }, 404);
+  await q('insert into buck_shares(buck_id,to_user) values($1,$2) on conflict do nothing', [b.id, t.id]);
+  if (t.prefs?.billing !== false) mail(t.email, `${me.first_name} shared ${b.name} with you`, `<p>Hi ${eh(t.first_name)}, ${eh(me.first_name)} ${eh(me.last_name || '')} shared the buck <b>${eh(b.name)}</b>${b.points ? ` (${b.points}-point)` : ''} with you on Deer Ager.</p>${btn(env.APP_URL + '/', 'Open Deer Ager')}<p style="font-size:12px;color:#666">Find it under Bucks > Shared with me.</p>`, 'buck_share').catch(() => {});
+  return c.json({ ok: true, name: t.first_name }); });
+app.get('/api/bucks/:id/shares', auth, gate, async c => { const b = await ownBuck(c); if (!b) return c.json({ error: 'not_found' }, 404); return c.json(await q("select u.id,u.first_name,u.last_name from buck_shares s join users u on u.id=s.to_user where s.buck_id=$1 order by s.created_at", [b.id])); });
+app.delete('/api/bucks/:id/shares/:uid', auth, gate, async c => { const b = await ownBuck(c); if (b) await q('delete from buck_shares where buck_id=$1 and to_user=$2', [b.id, c.req.param('uid')]); return c.json({ ok: true }); });
+app.get('/api/shared', auth, async c => c.json(await q("select b.id,b.name,b.points,b.hunted_on,s.created_at,u.first_name,u.last_name from buck_shares s join bucks b on b.id=s.buck_id join users u on u.id=b.user_id where s.to_user=$1 order by s.created_at desc", [c.get('user').id])));
+app.get('/api/shared/:id', auth, async c => { const [b] = await q('select b.* from bucks b join buck_shares s on s.buck_id=b.id where b.id=$1 and s.to_user=$2', [c.req.param('id'), c.get('user').id]); return b ? c.json(await buckSheet(b)) : c.json({ error: 'not_found' }, 404); });
+app.delete('/api/shared/:id', auth, async c => { await q('delete from buck_shares where buck_id=$1 and to_user=$2', [c.req.param('id'), c.get('user').id]); return c.json({ ok: true }); });
+
 // ---------- scans: photos -> S3, all configured models -> best result -> Postgres
 async function report(s: any) {
   const runs = await q('select provider,model,class,confidence,latency_ms,error,result from model_runs where scan_id=$1 and truth_class is null order by confidence desc nulls last', [s.id]);
@@ -349,6 +388,25 @@ A.post('/email/test', async c => { const { to } = await c.req.json(); if (!/^\S+
 A.post('/stripe/test', async c => { const st = await getStripe(); if (!st) return c.json({ error: 'no_secret_key' }, 400); try { return c.json({ ok: true, livemode: (await st.balance.retrieve()).livemode }); } catch (e: any) { return c.json({ error: e.message }, 400); } });
 A.post('/stripe/webhook', async c => { const st = await getStripe(); if (!st) return c.json({ error: 'no_secret_key' }, 400);
   try { const w = await st.webhookEndpoints.create({ url: env.APP_URL + '/api/webhooks/stripe', enabled_events: ['checkout.session.completed', 'customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted', 'invoice.payment_failed'] }); await setSetting('stripe_webhook_secret', w.secret!, c.get('user').id); await audit(c.get('user').id, 'webhook_created', { id: w.id }); return c.json({ ok: true, url: w.url }); } catch (e: any) { return c.json({ error: e.message }, 400); } });
+A.get('/tdrill', async c => { const d = String(Math.min(Math.max(+(c.req.query('days') || 30), 1), 365)), kind = c.req.query('kind') || 'views', val = c.req.query('value') || '';
+  const base = `with v as (select at,path,coalesce(nullif(utm_source,''),nullif(ref,''),'direct') src,visitor,device,country,landing,lag(path) over (partition by visitor order by at) prev_path,lead(path) over (partition by visitor order by at) next_path from visits where at>now()-($1||' days')::interval)`;
+  const visitors = async (where: string, p: any[]) => q(`${base}, f as (select * from v ${where}) select left(visitor,6) vid,min(at) first_seen,max(at) last_seen,count(*)::int views,(array_agg(src order by at))[1] source,(array_agg(device order by at))[1] device,(array_agg(country order by at))[1] country,string_agg(path,' > ' order by at) journey from f group by visitor order by max(at) desc limit 300`, p);
+  if (kind === 'visitors') return c.json({ mode: 'visitors', title: 'All visitors', rows: await visitors('', [d]) });
+  if (kind === 'source') return c.json({ mode: 'visitors', title: 'Visitors from ' + val, rows: await visitors('where visitor in (select visitor from v where landing and src=$2)', [d, val]) });
+  if (kind === 'device') return c.json({ mode: 'visitors', title: 'Visitors on ' + val, rows: await visitors('where visitor in (select visitor from v where device=$2)', [d, val]) });
+  if (kind === 'country') return c.json({ mode: 'visitors', title: 'Visitors from ' + val, rows: await visitors('where visitor in (select visitor from v where country=$2)', [d, val]) });
+  if (kind === 'day') return c.json({ mode: 'visitors', title: 'Visitors on ' + val, rows: await visitors("where visitor in (select visitor from v where to_char(date_trunc('day',at),'Mon DD')=$2)", [d, val]) });
+  const where = kind === 'path' ? 'where path=$2' : '', p = kind === 'path' ? [d, val] : [d];
+  const rows = await q(`${base} select at,path,src,prev_path,next_path,device,country,left(visitor,6) vid from v ${where} order by at desc limit 300`, p);
+  const out: any = { mode: 'views', title: kind === 'path' ? 'Page: ' + val : 'All page views', rows };
+  if (kind === 'path') { out.came_from = await q(`${base} select coalesce(prev_path,'From '||src) k,count(*)::int n from v ${where} group by 1 order by 2 desc limit 10`, p); out.went_to = await q(`${base} select coalesce(next_path,'Left the site') k,count(*)::int n from v ${where} group by 1 order by 2 desc limit 10`, p); }
+  return c.json(out); });
+A.get('/models/overview', async c => c.json({
+  usage: await q("select provider,model,count(*)::int runs,count(*) filter (where error is not null)::int errors,count(*) filter (where class is null and error is null)::int unclear,round(avg(confidence))::int avg_conf,round(avg(latency_ms))::int ms from model_runs where truth_class is null group by 1,2 order by 3 desc"),
+  graded: await q("select r.provider,count(*)::int n,round(avg((r.result->'dist'->>'best'=s.truth_age)::int)*100)::int exact,round(avg((abs(replace(r.result->'dist'->>'best','+','')::numeric-replace(s.truth_age,'+','')::numeric)<=1)::int)*100)::int within1 from model_runs r join scans s on s.id=r.scan_id where s.truth_age is not null and r.truth_class is null and r.result->'dist'->>'best' is not null group by 1"),
+  scans: await q("select s.id,s.created_at,s.class,s.range,s.confidence,s.truth_age,u.first_name,u.last_name,s.observations->'dist'->>'best' best from scans s join users u on u.id=s.user_id where s.mode='jaw' and s.class is not null order by s.created_at desc limit 60") }));
+A.post('/scans/:id/truth', async c => { const { truth_age } = await c.req.json().catch(() => ({})); if (truth_age && !AGES.includes(truth_age)) return c.json({ error: 'invalid_input' }, 400);
+  await q('update scans set truth_age=$1 where id=$2', [truth_age || null, c.req.param('id')]); return c.json({ ok: true }); });
 A.post('/benchmark/:scanId', async c => { const { truth_class } = await c.req.json().catch(() => ({})); const [s] = await q('select * from scans where id=$1', [c.req.param('scanId')]); if (!s) return c.json({ error: 'not_found' }, 404);
   const imgs = await Promise.all((await q('select s3_key from photos where scan_id=$1 order by slot', [s.id])).map(async (p: any) => ({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') })));
   const out = await Promise.all(configured().map(p => runModel(p, imgs, s.mode)));

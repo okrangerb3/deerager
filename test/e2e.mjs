@@ -146,6 +146,26 @@ r = await call('GET', '/scans', null, A); const loose = r.j[0].id; r = await cal
 await call('PATCH', '/scans/' + loose, { buck_id: null }, A); r = await call('GET', `/bucks/${lid}`, null, A); ok('scan can be removed from buck', !r.j.scan_list.some(x => x.id === loose), r.j.scan_list);
 r = await call('POST', `/bucks/${lid}/photos`, pf, B); ok("other users can't add photos to my buck", r.s === 404, r);
 const pid2 = (await call('GET', `/bucks/${lid}`, null, A)).j.photo_list[0].id; await call('DELETE', `/bucks/${lid}/photos/${pid2}`, null, A); r = await call('GET', `/bucks/${lid}`, null, A); ok('buck photo deletes', r.j.photo_list.length === 0, r.j);
+// --- buck data sheet, sharing, admin drilldowns
+r = await call('GET', `/bucks/${lid}/sheet`, null, A); ok('buck sheet has name, points and a hero image slot', r.s === 200 && r.j.name === 'Lightning' && r.j.points === 8 && 'hero' in r.j && Array.isArray(r.j.scans), r.j);
+r = await call('POST', `/bucks/${lid}/share`, null, A); ok('buck share link created', r.s === 200 && /\/b\/[0-9a-f]{32}$/.test(r.j.url), r); const btok = r.j.url.split('/b/')[1];
+r = await call('GET', '/bshare/' + btok); ok('public buck sheet loads without login and hides owner data', r.s === 200 && r.j.name === 'Lightning' && !JSON.stringify(r.j).includes('a@test.com'), r.j);
+r = await call('GET', '/bshare/nope'); ok('bad buck link is 404', r.s === 404, r);
+r = await call('POST', `/bucks/${lid}/email`, { to: ['friend@test.com'] }, A); ok('buck sheet email sends', r.s === 200 && r.j.sent === 1, r);
+r = await call('POST', `/bucks/${lid}/share-member`, { email: 'nobody@test.com' }, A); ok('sharing with a non-member is refused', r.s === 404 && r.j.error === 'member_not_found', r);
+r = await call('POST', `/bucks/${lid}/share-member`, { email: 'friend@test.com' }, A); ok('share with a member works', r.s === 200, r);
+r = await call('GET', '/shared', null, F); ok('member sees the shared buck', r.s === 200 && r.j.some(x => x.id === lid), r.j);
+r = await call('GET', '/shared/' + lid, null, F); ok('member can open shared sheet', r.s === 200 && r.j.name === 'Lightning', r);
+r = await call('GET', '/shared/' + lid, null, B); ok('other members cannot open it', r.s === 404, r);
+r = await call('GET', `/bucks/${lid}`, null, F); ok('shared member cannot edit or open the live buck', r.s === 404 || r.s === 403, r);
+r = await call('DELETE', `/bucks/${lid}/shares/${await uid('friend@test.com')}`, null, A); r = await call('GET', '/shared', null, F); ok('owner can stop sharing', !r.j.some(x => x.id === lid), r.j);
+await fetch(BASE + '/api/hit', { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'Mozilla/5.0 (iPhone) Safari' }, body: JSON.stringify({ path: '/', landing: true, ref: 'https://facebook.com/x' }) });
+r = await call('GET', '/admin/tdrill?kind=visitors&days=30', null, AD); ok('analytics drill: visitors', r.s === 200 && r.j.mode === 'visitors' && Array.isArray(r.j.rows), r);
+r = await call('GET', '/admin/tdrill?kind=path&value=%2F&days=30', null, AD); ok('analytics drill: page with came-from and went-to', r.s === 200 && Array.isArray(r.j.came_from) && Array.isArray(r.j.went_to), r);
+for (const k of ['views', 'source', 'device', 'country', 'day']) { r = await call('GET', `/admin/tdrill?kind=${k}&value=x&days=30`, null, AD); ok('analytics drill: ' + k, r.s === 200, r); }
+r = await call('GET', '/admin/models/overview', null, AD); ok('models overview loads', r.s === 200 && Array.isArray(r.j.usage) && Array.isArray(r.j.scans), r);
+const gs = r.j.scans[0]; r = await call('POST', `/admin/scans/${gs.id}/truth`, { truth_age: '4.5' }, AD); ok('grading a scan works', r.s === 200, r); r = await call('POST', `/admin/scans/${gs.id}/truth`, { truth_age: '9' }, AD); ok('bad true age rejected', r.s === 400, r);
+r = await call('GET', '/admin/models/overview', null, AD); ok('graded accuracy computed', r.j.graded.length >= 1 && r.j.graded[0].exact != null, r.j.graded);
 // --- delivery + security
 const h = await fetch(BASE + '/'); ok('landing page served with security headers', h.status === 200 && h.headers.get('x-frame-options') === 'DENY' && h.headers.get('content-security-policy').includes("frame-ancestors 'none'") && h.headers.get('strict-transport-security') && (await h.text()).includes('Deer Ager'));
 ok('logo + share page + health', (await fetch(BASE + '/logo.svg')).headers.get('content-type').includes('svg') && (await fetch(BASE + '/s/abc')).status === 200 && (await (await fetch(BASE + '/health')).text()) === 'ok');
