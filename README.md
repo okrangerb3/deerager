@@ -57,3 +57,6 @@ Card data never touches this server: payment uses Stripe-hosted Checkout and the
 
 ## When a result doesn't match what you know
 Every report has a "Doesn't match what you know?" card: **I know his age** (saved on the scan and used to check accuracy), **Retake photos** (one free retake per scan, with tips based on what the analysis flagged; it does not use a trial scan), or **Re-run the same photos**. Jaw scans can also include photos of the live deer, tied to a named deer in the Bucks log.
+
+## Age case (per deer)
+Scans on a named deer are pooled into one running estimate on the buck page. Rescans and retakes replace the scans they came from, a known age (hunter or lab) overrides the photos, and hunter feedback on earlier results ("too young", "too old") is passed to the AI on the next scan of that deer.

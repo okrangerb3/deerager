@@ -75,6 +75,9 @@ await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_a
   ok('rescan with new + earlier + saved deer photos', r.s === 200 && r.j.id !== sid, r); const nid = r.j.id;
   const n = (await db.query('select count(*)::int n from photos where scan_id=$1', [nid])).rows[0].n; ok('rescan keeps earlier jaw photos plus new one', n === 3, n);
   f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); f.append('reuse_scan', nid); r = await call('POST', '/scans', f, A); ok('rescan with no new photos works', r.s === 200, r);
+  r = await call('GET', '/bucks/' + bid, null, A); const ac = r.j.age_case; ok('age case built from scans', ac && ac.dist?.best && ac.n_total >= 3 && ac.n_used >= 1 && ac.n_used < ac.n_total, ac);
+  ok('rescan source marked replaced', ac.sources.some(x => x.superseded), ac.sources);
+  await call('PATCH', '/scans/' + nid, { user_age: '5.5' }, A); r = await call('GET', '/bucks/' + bid, null, A); ok('known age overrides the case', r.j.age_case.known === '5.5' && r.j.age_case.dist.best === '5.5', r.j.age_case);
   f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); r = await call('POST', '/scans', f, A); ok('no photos and no reuse rejected', r.s === 400, r);
   await db.query("delete from bucks where name='Rescan Ray'"); }
 // ---- named deer + deer photos on jaw scans
