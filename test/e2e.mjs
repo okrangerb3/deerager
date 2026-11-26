@@ -136,6 +136,16 @@ r = await call('GET', '/admin/analytics', null, M); ok('analytics is admin-only'
 const home = await (await fetch(BASE + '/')).text(); ok('landing page is SEO-ready (title, description, canonical, schema, h1, OG)', ['<title>Deer Ager | Estimate', 'name="description"', 'rel="canonical"', 'application/ld+json', "<h1>Estimate a Deer's Age", 'og:title', 'How it works'].every(t => home.includes(t)));
 ok('robots.txt + sitemap.xml', (await (await fetch(BASE + '/robots.txt')).text()).includes('Disallow: /api/') && (await (await fetch(BASE + '/sitemap.xml')).text()).includes('<urlset'));
 ok('shared report pages are noindex', (await fetch(BASE + '/s/abc')).headers.get('x-robots-tag') === 'noindex');
+// --- buck points, photos, attach scans
+r = await call('POST', '/bucks', { name: 'Lightning', points: '8' }, A); ok('buck saves points', r.s === 200 && r.j.points === 8, r); const lid = r.j.id;
+r = await call('POST', '/bucks', { name: 'Bad', points: '999' }, A); ok('points are capped', r.j.points === 40, r.j);
+let pf = new FormData(); pf.append('kind', 'field'); pf.append('photo', jpg(), 'f.jpg'); r = await call('POST', `/bucks/${lid}/photos`, pf, A); ok('buck photo uploads', r.s === 200 && r.j.ids?.length === 1, r);
+r = await call('GET', `/bucks/${lid}`, null, A); ok('buck detail lists photo and loose scans', r.j.photo_list.length === 1 && r.j.photo_list[0].kind === 'field' && Array.isArray(r.j.loose_scans), r.j);
+r = await call('GET', '/bucks', null, A); ok('buck list shows points + photo count', r.j.find(b => b.id === lid)?.points === 8 && r.j.find(b => b.id === lid)?.photo_count === 1, r.j);
+r = await call('GET', '/scans', null, A); const loose = r.j[0].id; r = await call('PATCH', '/scans/' + loose, { buck_id: lid }, A); r = await call('GET', `/bucks/${lid}`, null, A); ok('scan attached to buck', r.j.scan_list.some(x => x.id === loose), r.j.scan_list);
+await call('PATCH', '/scans/' + loose, { buck_id: null }, A); r = await call('GET', `/bucks/${lid}`, null, A); ok('scan can be removed from buck', !r.j.scan_list.some(x => x.id === loose), r.j.scan_list);
+r = await call('POST', `/bucks/${lid}/photos`, pf, B); ok("other users can't add photos to my buck", r.s === 404, r);
+const pid2 = (await call('GET', `/bucks/${lid}`, null, A)).j.photo_list[0].id; await call('DELETE', `/bucks/${lid}/photos/${pid2}`, null, A); r = await call('GET', `/bucks/${lid}`, null, A); ok('buck photo deletes', r.j.photo_list.length === 0, r.j);
 // --- delivery + security
 const h = await fetch(BASE + '/'); ok('landing page served with security headers', h.status === 200 && h.headers.get('x-frame-options') === 'DENY' && h.headers.get('content-security-policy').includes("frame-ancestors 'none'") && h.headers.get('strict-transport-security') && (await h.text()).includes('Deer Ager'));
 ok('logo + share page + health', (await fetch(BASE + '/logo.svg')).headers.get('content-type').includes('svg') && (await fetch(BASE + '/s/abc')).status === 200 && (await (await fetch(BASE + '/health')).text()) === 'ok');
