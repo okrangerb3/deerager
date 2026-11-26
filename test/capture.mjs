@@ -20,5 +20,5 @@ for (const mode of ['normal', 'nobitmap', 'nullblob', 'hang']) {
   Object.defineProperty(inp, 'files', { value: [f] }); inp.dispatchEvent(new w.Event('change')); await sleep(700);
   const btn = w.document.getElementById('goA'); ok(`[${mode}] Analyze enables right after choosing a photo`, btn && !btn.disabled, btn && btn.outerHTML.slice(0, 120));
   if (mode === 'normal') { btn.click(); await sleep(2500); const t = txt(w);
-    ok('results page shows the estimate, confidence and the reasoning sections', ['Estimate', 'Confidence', 'Why this result', 'Rule applied', 'What the AI saw', 'How confident, and why', 'Other possibilities considered', 'To be more certain', 'How age classes are determined'].every(s => t.includes(s)), t.slice(0, 400)); } }
+    ok('results page shows the estimate, confidence and the reasoning sections', ['Estimate', 'Confidence', 'Can I shoot him?', 'My minimum age', 'Why this result', 'Rule applied', 'What the AI saw', 'How confident, and why', 'Other possibilities considered', 'To be more certain', 'How age classes are determined'].every(s => t.includes(s)), t.slice(0, 400)); } }
 ok('no uncaught JS errors', errs.length === 0, errs.join(' | ')); console.log(fails ? fails + ' FAILED' : 'ALL PASSED'); process.exit(fails ? 1 : 0);

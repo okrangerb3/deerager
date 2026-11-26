@@ -64,7 +64,7 @@ const PROMPT: any = {
   deer: 'You assist a hunter estimating the age class of a whole white-tailed deer from body photos. This is unreliable: cap confidence at 60.',
   bc: 'You estimate Boone and Crockett typical whitetail net score from antler photos using a visible scale reference. If none, usable=false.'
 };
-const FORMAT = ' Reply with ONLY one JSON object with these fields: {"usable":bool,"quality":0-100 (overall photo quality),"premolar3_temporary":bool|null,"molar_wear":0|1|2|3|null,"net_low":number|null,"net_high":number|null,"confidence":0-100,"reasoning":"3-6 plain sentences, written for a hunter, explaining how what you saw leads to this age","features":[{"feature":"e.g. 3rd premolar","observation":"what you see","points_to":"what that suggests about age"}],"alternatives":["other age classes you considered and why they are less likely"],"photo_notes":["one note per photo: what it shows and any quality problem"],"evidence":[string],"would_change_answer":["specific extra photo or fact that would raise or change your confidence"],"missing":[specific extra photo or fix needed],"issues":[string]}. Wear scale: 0 unworn/just erupted, 1 light, 2 moderate (dentine wider than enamel), 3 heavy. If photos are blurry, glared, dark, incomplete or not what was requested, set usable=false and say exactly what to retake. Never guess.';
+const FORMAT = ' Reply with ONLY one JSON object with these fields: {"usable":bool,"quality":0-100 (overall photo quality),"premolar3_temporary":bool|null,"molar_wear":0|1|2|3|null,"net_low":number|null,"net_high":number|null,"confidence":0-100,"reasoning":"3-6 plain sentences, written for a hunter, explaining how what you saw leads to this age","features":[{"feature":"e.g. 3rd premolar","observation":"what you see","points_to":"what that suggests about age"}],"alternatives":["other age classes you considered and why they are less likely"],"photo_notes":["one note per photo: what it shows and any quality problem"],"evidence":[string],"would_change_answer":["specific extra photo or fact that would raise or change your confidence"],"age_probs":{"0.5":n,"1.5":n,"2.5":n,"3.5":n,"4.5":n,"5.5":n,"6.5+":n} (your honest percent probability for each age, summing to 100; lean toward the most likely age and be decisive, but reflect real uncertainty: for jaws weigh dentine-to-enamel ratio, cusp sharpness and wear grade; for live deer weigh leg length to body depth, belly sag, neck and shoulder muscle, swayback, face shape),"missing":[specific extra photo or fix needed],"issues":[string]}. Wear scale: 0 unworn/just erupted, 1 light, 2 moderate (dentine wider than enamel), 3 heavy. If photos are blurry, glared, dark, incomplete or not what was requested, set usable=false and say exactly what to retake. Never guess.';
 const post = async (url: string, headers: any, body: any) => { const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }); if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 200)}`); return r.json(); };
 const parse = (t: string) => { const m = t.match(/\{[\s\S]*\}/); return JSON.parse(m ? m[0] : t); };
 const PROV: any = {
@@ -77,11 +77,28 @@ const configured = () => Object.keys(PROV).filter(p => env.MOCK_MODELS || (env[K
 const MOCK: any = { claude: [2, 82], openai: [2, 71], gemini: [1, 58] };
 async function runModel(p: string, imgs: any[], mode: string) {
   const t = Date.now(), model = env.MOCK_MODELS ? 'mock-' + p : env['MODEL_' + p.toUpperCase()];
-  if (env.MOCK_MODELS) return { provider: p, model, ms: 1, result: mode === 'bc' ? { usable: false, quality: 80, confidence: 20, missing: ['Add a ruler or hat for scale'], issues: ['No scale reference'] } : { usable: true, quality: 90, premolar3_temporary: false, molar_wear: MOCK[p][0], confidence: MOCK[p][1], evidence: ['mock evidence from ' + p], reasoning: 'The third premolar is a permanent tooth and the molar crests show moderate wear, so this deer is middle-aged.', features: [{ feature: '3rd premolar', observation: 'Permanent, two cusps', points_to: 'Yearling or older' }, { feature: 'First molar', observation: 'Dentine wider than enamel', points_to: 'Moderate wear, about 3.5-5.5 years' }], alternatives: ['2.5 years: less likely because the dentine is wider than the enamel'], photo_notes: ['Photo 1: sharp, good light'], would_change_answer: ['A top-down photo of the molars would confirm the wear grade'], missing: [], issues: [] } };
+  if (env.MOCK_MODELS) return { provider: p, model, ms: 1, result: mode === 'bc' ? { usable: false, quality: 80, confidence: 20, missing: ['Add a ruler or hat for scale'], issues: ['No scale reference'] } : { usable: true, quality: 90, premolar3_temporary: false, molar_wear: MOCK[p][0], age_probs: { '2.5': 5, '3.5': 25, '4.5': 40, '5.5': 22, '6.5+': 8 }, confidence: MOCK[p][1], evidence: ['mock evidence from ' + p], reasoning: 'The third premolar is a permanent tooth and the molar crests show moderate wear, so this deer is middle-aged.', features: [{ feature: '3rd premolar', observation: 'Permanent, two cusps', points_to: 'Yearling or older' }, { feature: 'First molar', observation: 'Dentine wider than enamel', points_to: 'Moderate wear, about 3.5-5.5 years' }], alternatives: ['2.5 years: less likely because the dentine is wider than the enamel'], photo_notes: ['Photo 1: sharp, good light'], would_change_answer: ['A top-down photo of the molars would confirm the wear grade'], missing: [], issues: [] } };
   try { return { provider: p, model, result: parse(await PROV[p](imgs, mode)), ms: Date.now() - t }; } catch (e: any) { return { provider: p, model, error: String(e.message || e).slice(0, 300), ms: Date.now() - t }; }
 }
 const confDetail = (o: any, mode: string) => { const cap = mode === 'jaw' ? 100 : 60, m = o?.confidence ?? 0, q = o?.quality ?? 100, f = Math.max(0, Math.min(m, q, cap)); return { model: m, quality: q, cap, final: f, limited_by: q < m && q <= cap ? 'photo quality' : cap < m && cap < q ? 'the method limit' : 'AI certainty' }; };
 const conf = (o: any, mode: string) => confDetail(o, mode).final;
+// Age probability: the model's own distribution blended with a population prior. The less we trust the photos, the more the prior (and so honest uncertainty) shows.
+const AGES = ['0.5', '1.5', '2.5', '3.5', '4.5', '5.5', '6.5+'];
+const PRIOR: any = { '0.5': 0.02, '1.5': 0.18, '2.5': 0.22, '3.5': 0.22, '4.5': 0.17, '5.5': 0.12, '6.5+': 0.07 };
+const FIXED: any = { Fawn: { '0.5': 1 }, Yearling: { '1.5': 0.88, '2.5': 0.12 }, '2.5': { '1.5': 0.1, '2.5': 0.72, '3.5': 0.18 } };
+const ageDist = (o: any, mode: string, cls: string | null, cf: number) => {
+  if (!o || o.usable === false || mode === 'bc') return null;
+  let m: any = FIXED[cls as string] || null;
+  if (!m && o.age_probs && typeof o.age_probs === 'object') { m = {}; let t = 0; for (const a of AGES) { m[a] = Math.max(0, +o.age_probs[a] || 0); t += m[a]; } if (t > 0) for (const a of AGES) m[a] /= t; else m = null; }
+  if (!m && cls === 'Middle') m = { '3.5': 0.36, '4.5': 0.34, '5.5': 0.3 }; if (!m && cls === 'Old') m = { '5.5': 0.3, '6.5+': 0.7 };
+  if (!m) return null;
+  const c = Math.min(cf / 100, mode === 'jaw' ? 0.9 : 0.6), probs: any = {}; let tot = 0;
+  for (const a of AGES) { probs[a] = c * (m[a] || 0) + (1 - c) * PRIOR[a]; tot += probs[a]; }
+  for (const a of AGES) probs[a] = Math.round((probs[a] / tot) * 1000) / 10;
+  const best = AGES.reduce((x, y) => (probs[y] > probs[x] ? y : x)); let cum = 0, lo = AGES[0], hi = AGES[AGES.length - 1], gotLo = false;
+  for (const a of AGES) { cum += probs[a]; if (!gotLo && cum >= 10) { lo = a; gotLo = true; } if (cum >= 90) { hi = a; break; } }
+  return { probs, best, lo, hi, method: mode };
+};
 
 // ---------- email (Resend)
 async function mail(to: string, subject: string, body: string, kind = 'misc') {
@@ -157,7 +174,8 @@ app.patch('/api/me', auth, async c => { const u = c.get('user'), b = await c.req
 app.post('/api/password', auth, async c => { const u = c.get('user'), b = await c.req.json(); if (!bcrypt.compareSync(b.current || '', u.pw)) return c.json({ error: 'bad_credentials' }, 401); if ((b.password || '').length < 10) return c.json({ error: 'weak_password' }, 400);
   await q('update users set pw=$1 where id=$2', [bcrypt.hashSync(b.password, 12), u.id]); return c.json({ ok: true }); });
 app.put('/api/prefs', auth, async c => { const b = await c.req.json(); const extra = [...new Set((b.extra_emails || []).map((x: string) => String(x).trim().toLowerCase()).filter((x: string) => /^\S+@\S+\.\S+$/.test(x)))].slice(0, 5);
-  await q('update users set prefs=$1 where id=$2', [{ results_email: !!b.results_email, billing: b.billing !== false, extra_emails: extra }, c.get('user').id]); return c.json({ ok: true, extra_emails: extra }); });
+  const min_age = [2.5, 3.5, 4.5, 5.5, 6.5].includes(+b.min_age) ? +b.min_age : (c.get('user').prefs?.min_age ?? 4.5);
+  await q('update users set prefs=$1 where id=$2', [{ results_email: !!b.results_email, billing: b.billing !== false, extra_emails: extra, min_age }, c.get('user').id]); return c.json({ ok: true, extra_emails: extra }); });
 
 // ---------- bucks (private to owner; admin reads via /api/admin)
 const BUCK = ['name', 'hunted_on', 'location', 'stand', 'wind_dir', 'temp_f', 'rut_phase', 'tactics', 'notes', 'bc', 'points'];
@@ -196,7 +214,8 @@ async function runAnalysis(s: any, u: any, imgs: any[]) {
   const mode = s.mode, all = configured(); if (!all.length) return { error: 'analysis_unavailable' };
   const pick = (await getSetting('compare_all')) === 'false' ? [all.includes(env.PRIMARY_MODEL!) ? env.PRIMARY_MODEL! : all[0]] : all;
   const runs = await Promise.all(pick.map(p => runModel(p, imgs, mode)));
-  const scored = runs.map((r: any) => { const o = r.result, k: any = !o ? { cls: null, range: null } : mode === 'bc' ? { cls: o.usable !== false && o.net_low != null ? `Net ${o.net_low}-${o.net_high} in (est.)` : null, range: 'Estimate only. Not an official score.' } : classify(o); if (o) { o.rule = k.rule || null; o.conf_detail = confDetail(o, mode); } return { ...r, ...k, conf: o ? conf(o, mode) : null }; });
+  const scored = runs.map((r: any) => { const o = r.result, k: any = !o ? { cls: null, range: null } : mode === 'bc' ? { cls: o.usable !== false && o.net_low != null ? `Net ${o.net_low}-${o.net_high} in (est.)` : null, range: 'Estimate only. Not an official score.' } : classify(o); if (o) { o.rule = k.rule || null; o.conf_detail = confDetail(o, mode); const d = mode === 'bc' ? null : ageDist(o, mode, k.cls, conf(o, mode));
+      if (d) { o.dist = d; if (!k.cls && mode === 'deer') k.cls = d.best; if (mode === 'deer' || k.cls === 'Middle' || k.cls === 'Old') k.range = `Most likely ${d.best} years (likely ${d.lo} to ${d.hi})`; } } return { ...r, ...k, conf: o ? conf(o, mode) : null }; });
   await q('delete from model_runs where scan_id=$1 and truth_class is null', [s.id]);
   for (const r of scored) await q('insert into model_runs(scan_id,provider,model,result,class,confidence,latency_ms,error) values($1,$2,$3,$4,$5,$6,$7,$8)', [s.id, r.provider, r.model, r.result || null, r.cls, r.conf, r.ms, r.error || null]);
   const good = scored.filter(r => r.cls).sort((a, b) => b.conf - a.conf), best = good[0] || scored.find(r => r.result);
