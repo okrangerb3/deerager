@@ -14,7 +14,8 @@
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 body{margin:0;min-height:100vh;min-height:100dvh;background:var(--bg);color:var(--ink);font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
 header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:8px;padding:calc(8px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) 8px calc(12px + env(safe-area-inset-left));background:var(--card);border-bottom:1px solid var(--line)}
-header a{display:flex;align-items:center;gap:8px;color:var(--ink);text-decoration:none;font:italic 700 20px Georgia,serif;flex:1;cursor:pointer}header a img{width:36px;height:36px}header a i{color:var(--gold)}
+header a{display:flex;align-items:center;gap:8px;color:var(--ink);text-decoration:none;font:italic 700 20px Georgia,serif;flex:1;cursor:pointer}header{position:sticky}.menuwrap{position:relative}.menubtn{font-size:20px;line-height:1;min-width:44px;min-height:40px}.menu{position:absolute;right:0;top:calc(100% + 6px);min-width:190px;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:4px 0;z-index:20}.menu[hidden]{display:none}.menu button{background:none;color:var(--ink);text-align:left;border-radius:0;font-weight:500;min-height:44px;padding:10px 14px}.menu button:hover{background:var(--accb)}
+header a img{width:36px;height:36px}header a i{color:var(--gold)}
 main{max-width:480px;margin:0 auto;padding:16px calc(16px + env(safe-area-inset-right)) calc(96px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left))}main.wide{max-width:1000px}main.pub{padding-bottom:40px}
 h1{font:italic 700 32px/1.15 Georgia,serif;margin:8px 0}.lead{font-size:17px;color:var(--mut)}section{margin:26px 0}h2{margin:6px 0 12px;font-size:22px}h3{margin:0 0 8px;font-size:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin:0 0 12px}.click{cursor:pointer}
@@ -94,9 +95,9 @@ function go(v,push=true){if(push&&S.view!==v&&!['prog'].includes(S.view))S.hist.
 function back(){let v=S.hist.pop();while(v&&['prog','cap'].includes(v)&&S.view!=='cap')v=S.hist.pop();S.view=v||(S.me?'home':'splash');draw();scrollTo(0,0)}
 function home(){S.hist=[];S.ro=false;S.view=S.me?(S.me.stage==='ready'?'home':'pay'):'splash';draw();scrollTo(0,0)}
 function draw(){const a=$('#app');if(location.pathname.startsWith('/s/')||location.pathname.startsWith('/c/'))return;const v=S.view,m=S.me;
- const hd=`<header>${S.hist.length&&v!=='home'?`<button class="sm alt" onclick="back()" aria-label="Back">←</button>`:''}<a onclick="home()">${logo}<span>Deer <i>Ager</i></span></a>${m?`<button class="sm alt" onclick="go('account')">${esc(m.first_name||'Account')}</button>`:`<button class="sm alt" onclick="go('login')">Sign in</button>`}</header>`;
+ const hd=`<header>${S.hist.length&&v!=='home'?`<button class="sm alt" onclick="back()" aria-label="Back">←</button>`:''}<a onclick="home()">${logo}<span>Deer <i>Ager</i></span></a>${m?`<div class="menuwrap"><button class="sm alt menubtn" aria-label="Menu" aria-haspopup="true" onclick="toggleMenu(event)">☰</button><div class="menu" id="menu" hidden><div class="mut" style="padding:8px 14px 4px">${esc(m.first_name||'')} ${esc(m.last_name||'')}</div><button onclick="closeMenu();S.hist=[];go('account')">👤 Account</button><button onclick="closeMenu();logout()">↩ Log out</button></div></div>`:`<button class="sm alt" onclick="go('login')">Sign in</button>`}</header>`;
  const pub=!m||['verify','pay'].includes(v)&&!S.ro,ready=m&&(m.stage==='ready'||S.ro);
- const nav=ready?[['home','🏠','Home'],['bucks','🦌','Bucks'],['bc','📏','B&C'],['account','👤','Account']].concat(m.role==='admin'?[['admin','⚙️','Admin']]:[]):[];
+ const nav=ready?[['home','🏠','Home'],['bucks','🦌','Bucks'],['bc','📏','B&C']].concat(m.role==='admin'?[['admin','⚙️','Admin']]:[]):[];
  a.innerHTML=hd+`<main class="${v==='admin'?'wide':['home','bucks','buck','rules'].includes(v)&&m?'app':''} ${m?'':'pub'}">${(views[v]||views.splash)()}</main>`+(nav.length?`<nav>${nav.map(([k,i,l])=>`<button class="${v===k?'on':''}" onclick="${k==='admin'?'openAdmin()':`S.hist=[];go('${k}')`}"><span>${i}</span>${l}</button>`).join('')}</nav>`:'');
  ({bc:bcCalc,bucks:loadBucks,admin:adminTab,splash:prices,home:loadRecent})[v]?.();track(v)}
 // ---------- public pages
@@ -172,6 +173,9 @@ async function suPay(){const b=$('#sb');b.disabled=true;$('#ae').textContent='';
 async function login(){const b=$('#ab');b.disabled=true;$('#ae').textContent='';try{const r=await api('/login',{method:'POST',json:{email:val('em').trim(),password:val('pw')}});ls.set('t',r.token);await boot()}catch(e){$('#ae').textContent=e.message;b.disabled=false}}
 async function forgot(){try{await api('/forgot',{method:'POST',json:{email:val('em').trim()}});$('#ae').style.color='var(--acc)';$('#ae').textContent='If that email has an account, a reset link is on its way.'}catch(e){$('#ae').textContent=e.message}}
 async function doReset(){try{await api('/reset',{method:'POST',json:{token:new URLSearchParams(location.search).get('reset'),password:val('pw')}});history.replaceState(null,'','/');toast('Password updated. Sign in.');S.view='login';draw()}catch(e){$('#ae').textContent=e.message}}
+function toggleMenu(e){e.stopPropagation();const m=$('#menu');m.hidden=!m.hidden}
+function closeMenu(){const m=$('#menu');if(m)m.hidden=true}
+addEventListener('click',e=>{if(!e.target.closest||!e.target.closest('.menuwrap'))closeMenu()});addEventListener('keydown',e=>{if(e.key==='Escape')closeMenu()});
 function logout(){ls.set('t',null);S.me=null;S.hist=[];S.view='splash';draw()}
 async function resendVerify(){try{await api('/resend-verify',{method:'POST'});toast('Confirmation email sent')}catch(e){toast(e.message)}}
 async function checkout(plan){try{const r=await api('/billing/checkout',{method:'POST',json:{plan}});location.href=r.url}catch(e){toast(e.message)}}
