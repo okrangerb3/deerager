@@ -78,6 +78,7 @@ await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_a
   r = await call('GET', '/bucks/' + bid, null, A); const ac = r.j.age_case; ok('age case built from scans', ac && ac.dist?.best && ac.n_total >= 3 && ac.n_used >= 1 && ac.n_used < ac.n_total, ac);
   ok('rescan source marked replaced', ac.sources.some(x => x.superseded), ac.sources);
   await call('PATCH', '/scans/' + nid, { user_age: '5.5' }, A); r = await call('GET', '/bucks/' + bid, null, A); ok('hunter estimate shown but does not change the case', r.j.age_case.hunter === '5.5' && r.j.age_case.dist.method === 'case' && r.j.age_case.why.length >= 1, r.j.age_case);
+  f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); f.append('photos', dj(20), 'a.jpg'); f.append('labels', 'Left cheek side'); f.append('photos', dj(21), 'b.jpg'); f.append('labels', 'Angled chewing surface'); r = await call('POST', '/scans', f, A); ok('scan with shot labels works', r.s === 200, r);
   f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); r = await call('POST', '/scans', f, A); ok('no photos and no reuse rejected', r.s === 400, r);
   await db.query("delete from bucks where name='Rescan Ray'"); }
 // ---- named deer + deer photos on jaw scans
