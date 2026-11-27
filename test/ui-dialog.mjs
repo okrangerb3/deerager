@@ -8,7 +8,7 @@ let w=await open(await tok('admin@test.com','adminpass12'));
 w.eval("S.tab='analytics'");w.go('admin');await sleep(900);ok('analytics shows clickable hint',txt(w).includes('Visitors ›')&&txt(w).includes('Page views ›'));
 await w.tdrill('visitors','');await sleep(500);ok('visitor drilldown renders',txt(w).includes('Back to analytics')&&txt(w).includes('First seen'));
 w.eval('window.__r=null;askOk("Sure?","Yes, start").then(v=>window.__r=v)');await sleep(100);
-ok('dialog shows in page',txt(w).includes('Sure?')&&txt(w).includes('Yes, start'));
+ok('dialog shows in page',w.document.body.textContent.includes('Sure?')&&w.document.body.textContent.includes('Yes, start'));
 w.document.getElementById('okgo').click();await sleep(100);ok('confirm resolves true',w.__r===true);
 w.eval('askOk("Again?").then(v=>window.__r=v)');await sleep(50);w.document.getElementById('okno').click();await sleep(100);ok('cancel resolves false',w.__r===false);
 w.document.body.dispatchEvent(new w.Event('x'));w.eval('document.body.insertAdjacentHTML("beforeend","<button id=tb>go</button>")');const b=w.document.getElementById('tb');b.dispatchEvent(new w.MouseEvent('click',{bubbles:true}));ok('pressed class on tap',b.classList.contains('pressed'));
