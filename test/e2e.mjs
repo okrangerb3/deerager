@@ -143,6 +143,8 @@ r = await call('POST', '/admin/models/test', null, AD); ok('admin model connecti
   r = await call('POST', '/bio/connect', null, BIO); ok('connect fails cleanly when Stripe is unreachable', r.s === 502, r);
   r = await call('PUT', '/bio/profile', { title: 'State wildlife biologist' }, BIO); ok('biologist sets a title', r.s === 200, r);
   r = await call('GET', '/me', null, BIO); ok('biologist scans without a subscription', r.j.can_scan === true || r.j.stage === 'ready', r.j);
+  r = await call('POST', '/admin/users', { email: 'madebio@test.com', first_name: 'Sam', last_name: 'Bio', role: 'biologist', title: 'Wildlife biologist' }, AD); ok('admin adds a user as a biologist', r.s === 200 && (await db.query("select role,bio_title from users where email='madebio@test.com'")).rows[0].role === 'biologist', r);
+  r = await call('POST', '/admin/users', { email: 'madehunter@test.com', first_name: 'Hal', last_name: 'Hunt', role: 'admin' }, AD); ok('add user cannot create an admin', r.s === 200 && (await db.query("select role from users where email='madehunter@test.com'")).rows[0].role === 'user', r);
   // -- admin manages biologists
   r = await call('POST', '/admin/biologists', { email: 'newbio@test.com' }, AD); ok('new biologist needs a name', r.s === 400, r);
   r = await call('POST', '/admin/biologists', { email: 'newbio@test.com', first_name: 'Dana', last_name: 'Wild', title: 'DNR biologist' }, AD); ok('admin invites a brand-new biologist', r.s === 200 && r.j.invite_link, r);
