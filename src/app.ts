@@ -83,9 +83,14 @@ const PROV: any = {
 };
 const KEYS: any = { claude: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', gemini: 'GEMINI_API_KEY' };
 const configured = () => Object.keys(PROV).filter(p => env.MOCK_MODELS || (env[KEYS[p]] && env['MODEL_' + p.toUpperCase()]));
+// Circuit breaker: a model that fails for a lasting reason (no credit, bad key, unknown model) is skipped for 15 minutes so scans stay fast and users never wait on it. Admins see why in Admin > Models.
+const BREAKER: any = {};
+const fatalErr = (m: string) => /^(401|403|404) /.test(m) || /quota|billing|insufficient|no credits/i.test(m);
+const live = (all: string[]) => { const ok = all.filter(p => !(BREAKER[p]?.until > Date.now())); return ok.length ? ok : all; }; // if every model is tripped, try them all anyway
 const MOCK: any = { claude: [2, 82], openai: [2, 71], gemini: [1, 58] };
 async function runModel(p: string, imgs: any[], mode: string) {
   const t = Date.now(), model = env.MOCK_MODELS ? 'mock-' + p : env['MODEL_' + p.toUpperCase()];
+  if (env.MOCK_MODELS && (env.MOCK_FAIL || '').split(',').some(x => x === p || x === 'all')) return { provider: p, model, ms: 1, error: '429 You have no credits remaining (mock)' }; // test hook
   if (env.MOCK_MODELS) return { provider: p, model, ms: 1, inTok: 6000, outTok: 1200, result: mode === 'bc' ? { usable: false, quality: 80, confidence: 20, missing: ['Add a ruler or hat for scale'], issues: ['No scale reference'] } : { usable: true, quality: 90, premolar3_temporary: false, molar_wear: MOCK[p][0], age_probs: { '2.5': 5, '3.5': 25, '4.5': 40, '5.5': 22, '6.5+': 8 }, confidence: MOCK[p][1], evidence: ['mock evidence from ' + p], reasoning: 'The third premolar is a permanent tooth and the molar crests show moderate wear, so this deer is middle-aged.', features: [{ feature: '3rd premolar', observation: 'Permanent, two cusps', points_to: 'Yearling or older' }, { feature: 'First molar', observation: 'Dentine wider than enamel', points_to: 'Moderate wear, about 3.5-5.5 years' }], alternatives: ['2.5 years: less likely because the dentine is wider than the enamel'], photo_notes: ['Photo 1: sharp, good light'], would_change_answer: ['A top-down photo of the molars would confirm the wear grade'], missing: [], issues: [] } };
   let last = '', tin = 0, tout = 0;
   for (let i = 0; i < 2; i++) { // one retry for transient failures (overload, timeout, truncated or malformed JSON); tokens from every attempt are billed, so all are counted
@@ -297,23 +302,32 @@ app.get('/api/shared/:id', auth, async c => { const [b] = await q('select b.* fr
 app.delete('/api/shared/:id', auth, async c => { await q('delete from buck_shares where buck_id=$1 and to_user=$2', [c.req.param('id'), c.get('user').id]); return c.json({ ok: true }); });
 
 // ---------- scans: photos -> S3, all configured models -> best result -> Postgres
-async function report(s: any) {
-  const runs = await q('select provider,model,class,confidence,latency_ms,error,result from model_runs where scan_id=$1 and truth_class is null order by confidence desc nulls last', [s.id]);
+async function report(s: any, admin = false) {
+  const allRuns = await q('select provider,model,class,confidence,latency_ms,error,result from model_runs where scan_id=$1 and truth_class is null order by confidence desc nulls last', [s.id]), runs = admin ? allRuns : allRuns.filter((r: any) => !r.error); // end users never see a model that failed; admins do
   const ok = runs.filter((r: any) => r.class), best = ok[0] || null;
   return { id: s.id, pending: !!s.flags?.pending, failed: !!s.flags?.error, approval: s.approval || null, user_age: s.user_age || null, retake_of: s.retake_of || null, mode: s.mode, class: s.class, range: s.range, confidence: s.confidence, created_at: s.created_at, flags: s.flags, observations: s.observations,
     best: best && { provider: best.provider, model: best.model, confidence: best.confidence, observations: best.result }, agree: best ? ok.filter((r: any) => r.class === best.class).length : 0, total: runs.length,
     runs: runs.map((r: any) => ({ provider: r.provider, model: r.model, class: r.class, confidence: r.confidence, ms: r.latency_ms, error: r.error, evidence: r.result?.evidence || [] })), disclaimer: 'Estimate only. Tooth-wear aging is subjective; a lab cementum test is the gold standard.' };
 }
+// A scan that failed because every model was unavailable is retried by itself (90 seconds, then 6 minutes later), so the hunter just finds the result waiting.
+async function autoRetry(id: string, n: number) {
+  const [s] = await q('select * from scans where id=$1', [id]); if (!s || !s.flags?.error || s.class) return;
+  const [u] = await q('select * from users where id=$1', [s.user_id]), ph = await q('select s3_key from photos where scan_id=$1 order by slot', [id]); if (!u || !ph.length) return;
+  const imgs = await Promise.all(ph.map(async (p: any) => ({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') })));
+  s.flags = { ...s.flags, auto_retries: n }; const r: any = await runAnalysis(s, u, imgs); if (!r.error && r.scan?.class && u.prefs?.results_email) emailScan(r.scan, [u.email, ...(u.prefs.extra_emails || [])], u).catch(() => {});
+}
 async function runAnalysis(s: any, u: any, imgs: any[]) {
   const mode = s.mode, all = configured(); if (!all.length) return { error: 'analysis_unavailable' };
-  const pick = (await getSetting('compare_all')) === 'false' ? [all.includes(env.PRIMARY_MODEL!) ? env.PRIMARY_MODEL! : all[0]] : all;
+  const avail = live(all), pick = (await getSetting('compare_all')) === 'false' ? [avail.includes(env.PRIMARY_MODEL!) ? env.PRIMARY_MODEL! : avail[0]] : avail;
   const runs = await Promise.all(pick.map(p => runModel(p, imgs, mode)));
+  for (const r of runs as any[]) { if (r.error && fatalErr(r.error)) BREAKER[r.provider] = { until: Date.now() + 15 * 60e3, reason: String(r.error).replace(/\s+/g, ' ').slice(0, 200), since: BREAKER[r.provider]?.since || new Date().toISOString() }; else if (r.result) delete BREAKER[r.provider]; }
   const scored = runs.map((r: any) => { const o = r.result, k: any = !o ? { cls: null, range: null } : mode === 'bc' ? { cls: o.usable !== false && o.net_low != null ? `Net ${o.net_low}-${o.net_high} in (est.)` : null, range: 'Estimate only. Not an official score.' } : classify(o); if (o) { o.rule = k.rule || null; o.conf_detail = confDetail(o, mode); const d = mode === 'bc' ? null : ageDist(o, mode, k.cls, conf(o, mode));
       if (d) { o.dist = d; if (!k.cls && mode === 'deer') k.cls = d.best; if (mode === 'deer' || k.cls === 'Middle' || k.cls === 'Old') k.range = `Most likely ${d.best} years (likely ${d.lo} to ${d.hi})`; } } return { ...r, ...k, conf: o ? conf(o, mode) : null }; });
   await q('delete from model_runs where scan_id=$1 and truth_class is null', [s.id]);
   const pr = await prices(); for (const r of scored as any[]) await q('insert into model_runs(scan_id,provider,model,result,class,confidence,latency_ms,error,in_tokens,out_tokens,cost_usd) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [s.id, r.provider, r.model, r.result || null, r.cls, r.conf, r.ms, r.error || null, r.inTok || null, r.outTok || null, runCost(pr, r.model, r.inTok || 0, r.outTok || 0)]);
   const good = scored.filter(r => r.cls).sort((a, b) => b.conf - a.conf), best = good[0] || scored.find(r => r.result);
-  if (!best) { await q('update scans set flags=$1 where id=$2', [{ usable: false, error: true, missing: [], issues: ['The analysis service did not respond. Your photos are saved: tap Retry.'] }, s.id]); return { error: 'analysis_failed' }; }
+  if (!best) { const tries = (s.flags?.auto_retries || 0); await q('update scans set flags=$1 where id=$2', [{ usable: false, error: true, retrying: tries < 2, auto_retries: tries, missing: [], issues: ['We could not finish this one yet. Your photos are saved and we will keep trying.'] }, s.id]);
+    if (tries < 2 && !env.MOCK_MODELS) setTimeout(() => autoRetry(s.id, tries + 1).catch(() => {}), tries === 0 ? 90e3 : 6 * 60e3); return { error: 'analysis_failed' }; }
   const o = best.result, flags = { usable: !!best.cls, missing: o.missing || [], issues: o.issues || [] }, cf = best.conf;
   const [n] = await q('update scans set class=$1,range=$2,confidence=$3,observations=$4,flags=$5,model=$6 where id=$7 returning *', [best.cls, best.range, cf, o, flags, best.model, s.id]);
   if (flags.usable && !s.counted) { await q('update users set scans_used=scans_used+1 where id=$1', [u.id]); await q('update scans set counted=true where id=$1', [s.id]);
@@ -461,7 +475,7 @@ V1.post('/capture-links', async c => { const p = c.get('partner'), b = await c.r
   const t = crypto.randomBytes(18).toString('hex'), hrs = Math.min(Math.max(+b.expires_hours || 24, 1), 168); await q("insert into capture_links(token,partner_id,mode,ext,return_url,expires_at,max_uses) values($1,$2,$3,$4,$5,now()+($6||' hours')::interval,$7)", [t, p.id, b.mode, extFrom(b), ru, String(hrs), Math.min(Math.max(+b.max_uses || 3, 1), 10)]);
   return c.json({ url: `${env.APP_URL}/c/${t}`, expires_in_hours: hrs }); });
 app.route('/api/v1', V1);
-app.onError((e: any, c: any) => { console.error('unhandled', c.req.method, c.req.path, e?.stack || e?.message || e); return c.json({ error: 'server_error', detail: String(e?.message || e).slice(0, 160) }, 500); });
+app.onError((e: any, c: any) => { console.error('unhandled', c.req.method, c.req.path, e?.stack || e?.message || e); return c.json({ error: 'server_error', ...(c.get('user')?.role === 'admin' ? { detail: String(e?.message || e).slice(0, 160) } : {}) }, 500); });
 app.get('/c/:t', c => { c.header('x-robots-tag', 'noindex'); return c.html(HTML); });
 const capLink = async (t: string) => (await q('select l.*,p.name partner_name,p.active from capture_links l join partners p on p.id=l.partner_id where l.token=$1 and l.expires_at>now()', [t]))[0];
 app.get('/api/c/:t', async c => { const l = await capLink(c.req.param('t')); return l && l.active ? c.json({ mode: l.mode, partner: l.partner_name, return_url: l.return_url, left: l.max_uses - l.used }) : c.json({ error: 'not_found' }, 404); });
@@ -541,7 +555,7 @@ A.get('/users', async c => c.json(await q(`select ${USERCOLS} from users where e
 A.get('/users/:id', async c => { const id = c.req.param('id'), [u] = await q(`select ${USERCOLS},prefs from users where id=$1`, [id]); if (!u) return c.json({ error: 'not_found' }, 404);
   return c.json({ user: u, scans: await q('select s.id,s.mode,s.class,s.confidence,s.flags,s.created_at,b.name buck from scans s left join bucks b on b.id=s.buck_id where s.user_id=$1 order by s.created_at desc limit 100', [id]), bucks: await q('select * from bucks where user_id=$1 order by created_at desc', [id]), emails: await q('select kind,subject,status,at from email_log where to_addr=(select email from users where id=$1) order by at desc limit 20', [id]) }); });
 A.get('/scans/:id', async c => { const [s] = await q('select * from scans where id=$1', [c.req.param('id')]); if (!s) return c.json({ error: 'not_found' }, 404); const ph = await q('select s3_key from photos where scan_id=$1 order by slot', [s.id]);
-  return c.json({ ...(await report(s)), notes: s.notes, photos: ph.map((p: any) => s3.file(p.s3_key).presign({ expiresIn: 3600 })) }); });
+  return c.json({ ...(await report(s, true)), notes: s.notes, photos: ph.map((p: any) => s3.file(p.s3_key).presign({ expiresIn: 3600 })) }); });
 A.patch('/users/:id', async c => { const b = await c.req.json(), id = c.req.param('id'); await q('update users set status=coalesce($1,status),role=coalesce($2,role),lifetime_data=coalesce($3,lifetime_data) where id=$4', [b.status, b.role, b.lifetime_data, id]); await audit(c.get('user').id, 'user_update', { target: id, ...b }); return c.json({ ok: true }); });
 A.post('/users/:id/reset', async c => { const [u] = await q('select * from users where id=$1', [c.req.param('id')]); if (!u) return c.json({ error: 'not_found' }, 404); const st = await sendReset(u); await audit(c.get('user').id, 'admin_password_reset', { target: u.id }); return c.json({ ok: true, email: st }); });
 A.post('/users/:id/verify', async c => { const [u] = await q('select * from users where id=$1', [c.req.param('id')]); if (!u) return c.json({ error: 'not_found' }, 404); const st = await sendVerify(u); return c.json({ ok: true, email: st }); });
@@ -591,6 +605,7 @@ A.get('/models/overview', async c => {
       weekly: await q("select to_char(date_trunc('week',approval_at),'Mon DD') wk,count(*)::int n,count(*) filter (where approval='right')::int right_n from scans where approval is not null and mode='jaw' group by date_trunc('week',approval_at) order by date_trunc('week',approval_at) desc limit 8"),
       by_result: await q("select coalesce(observations->'dist'->>'best',class) age,count(*)::int n,count(*) filter (where approval='right')::int right_n,count(*) filter (where approval='too_young')::int too_young,count(*) filter (where approval='too_old')::int too_old from scans where approval is not null and mode='jaw' group by 1 order by 1"),
       rejected: await q("select s.id,s.approval_at,s.approval,s.user_age,s.truth_age,s.observations->'dist'->>'best' best,s.confidence,u.first_name,u.last_name from scans s join users u on u.id=s.user_id where s.approval in ('too_young','too_old') and s.mode='jaw' order by s.approval_at desc limit 25") },
+    breakers: Object.entries(BREAKER).filter(([, v]: any) => v.until > Date.now()).map(([p, v]: any) => ({ provider: p, reason: v.reason, since: v.since, retry_at: new Date(v.until).toISOString() })),
     scans: recent, wear: await q(`select r.result->>'molar_wear' wear,${tr} truth,count(*)::int n from model_runs r join scans s on s.id=r.scan_id where ${tr} is not null and r.truth_class is null and r.result->>'molar_wear' is not null group by 1,2 order by 1,2`) }); });
 const RERUN: any = { running: false, total: 0, done: 0, failed: 0, current: '', started: null, finished: null };
 A.get('/rerun-all', async c => c.json(RERUN));
