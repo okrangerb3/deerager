@@ -617,6 +617,20 @@ A.put('/costs/settings', async c => { const b = await c.req.json().catch(() => (
   if (b.storage_gb != null) { const v = +b.storage_gb; if (!(v >= 0) || v > 10) return c.json({ error: 'invalid_input' }, 400); await setSetting('cost_storage_gb', String(v), c.get('user').id); }
   if (b.budget != null) { const v = +b.budget; if (!(v >= 0) || v > 1e6) return c.json({ error: 'invalid_input' }, 400); await setSetting('cost_budget', String(v), c.get('user').id); }
   await audit(c.get('user').id, 'cost_settings', {}); return c.json({ ok: true }); });
+// Live check from the server itself: is the key valid, does the configured model answer, and which models does each key actually offer?
+A.post('/models/test', async c => { const out: any[] = [], pr = await prices();
+  const tests: any = {
+    claude: { list: async () => (await (await fetch('https://api.anthropic.com/v1/models?limit=100', { headers: { 'x-api-key': env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01' }, signal: AbortSignal.timeout(20000) })).json()).data?.map((m: any) => m.id) || [],
+      ping: () => post('https://api.anthropic.com/v1/messages', { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, { model: env.MODEL_CLAUDE, max_tokens: 16, messages: [{ role: 'user', content: 'Reply with OK' }] }) },
+    openai: { list: async () => ((await (await fetch('https://api.openai.com/v1/models', { headers: { authorization: 'Bearer ' + env.OPENAI_API_KEY }, signal: AbortSignal.timeout(20000) })).json()).data || []).map((m: any) => m.id),
+      ping: () => post('https://api.openai.com/v1/chat/completions', { authorization: 'Bearer ' + env.OPENAI_API_KEY }, { model: env.MODEL_OPENAI, messages: [{ role: 'user', content: 'Reply with OK' }] }) },
+    gemini: { list: async () => ((await (await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': env.GEMINI_API_KEY! }, signal: AbortSignal.timeout(20000) })).json()).models || []).map((m: any) => String(m.name).replace('models/', '')),
+      ping: () => post(`https://generativelanguage.googleapis.com/v1beta/models/${env.MODEL_GEMINI}:generateContent`, { 'x-goog-api-key': env.GEMINI_API_KEY }, { contents: [{ parts: [{ text: 'Reply with OK' }] }] }) } };
+  await Promise.all(Object.keys(PROV).map(async p => { const model = env['MODEL_' + p.toUpperCase()] || null, r: any = { provider: p, model, key: !!env[KEYS[p]] }; out.push(r);
+    if (env.MOCK_MODELS) { r.ok = true; r.mock = true; r.models = ['mock-' + p]; r.in_list = true; return; } if (!r.key || !model) { r.error = !r.key ? 'No API key set' : 'No model name set'; return; }
+    try { r.models = ((await tests[p].list()) as string[]).sort(); r.in_list = r.models.includes(model); } catch (e: any) { r.list_error = String(e.message || e).slice(0, 160); }
+    const box: any = {}, t = Date.now(); try { await usageBox.run(box, () => tests[p].ping()); r.ok = true; r.ms = Date.now() - t; r.in_tokens = box.inTok || 0; r.out_tokens = box.outTok || 0; r.cost = runCost(pr, model, r.in_tokens, r.out_tokens); } catch (e: any) { r.ok = false; r.error = String(e.message || e).slice(0, 300); } }));
+  out.sort((a, b) => a.provider.localeCompare(b.provider)); return c.json(out); });
 A.post('/scans/:id/truth', async c => { const { truth_age } = await c.req.json().catch(() => ({})); if (truth_age && !AGES.includes(truth_age)) return c.json({ error: 'invalid_input' }, 400);
   await q('update scans set truth_age=$1 where id=$2', [truth_age || null, c.req.param('id')]); return c.json({ ok: true }); });
 A.post('/benchmark/:scanId', async c => { const { truth_class } = await c.req.json().catch(() => ({})); const [s] = await q('select * from scans where id=$1', [c.req.param('scanId')]); if (!s) return c.json({ error: 'not_found' }, 404);

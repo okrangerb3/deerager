@@ -273,5 +273,6 @@ r = await call('POST', '/scans', scanForm('jaw'), AD); r = await call('GET', '/a
 r = await call('PUT', '/admin/costs/settings', { prices: { 'bad name!': { in: 1, out: 1 } } }, AD); ok('bad model name rejected', r.s === 400, r);
 r = await call('GET', '/admin/costs', null, AD); ok('saved rates and budget returned', r.j.prices['mock-claude'].in === 3 && r.j.storage_gb === 0.02 && r.j.budget === 50, r.j.prices['mock-claude']);
 r = await call('GET', '/admin/costs', null, A); ok('costs are admin only', r.s === 403 || r.s === 401, r.s);
+r = await call('POST', '/admin/models/test', null, AD); ok('admin model connection test runs', r.s === 200 && Array.isArray(r.j) && r.j.length === 3 && r.j.every(x => x.ok), r.j);
 hs.close();
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED'); await db.end(); process.exit(fails ? 1 : 0);
