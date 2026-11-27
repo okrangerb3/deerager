@@ -39,4 +39,20 @@ const T = await tok('bio@test.com', 'correct-horse-9'), H = await tok('admin@tes
   await p.evaluate(() => { S.tab = 'consults'; openAdmin(); }); await p.waitForSelector('text=Add biologist'); ok('admin Consults tab has biologist management', /Manage/.test(await p.textContent('#adm')));
   await p.click('#adm tr.click >> nth=0'); await p.waitForSelector('text=Their consults'); const t = await p.textContent('#adm');
   ok('biologist detail shows controls', /Suspend/.test(t) && /Remove biologist role/.test(t) && /Answered/.test(t)); }
+
+// buttons on the age report (top and bottom) open the ask dialog
+{ const hu = (await db.query("select id from users where email='admin@test.com'")).rows[0].id;
+  const sid = (await db.query("insert into scans(user_id,mode,class,range,confidence,flags,observations) values($1,'jaw','4.5','4.5-5.5',70,'{\"usable\":true}','{}') returning id", [hu])).rows[0].id;
+  const p = await (await b.newContext({ viewport: { width: 420, height: 900 } })).newPage(); p.on('pageerror', e => errs.push(e.message));
+  await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), H); await p.reload(); await p.waitForSelector('nav');
+  await p.evaluate(id => openScan(id), sid); await p.waitForSelector('text=Want a biologist');
+  ok('top-right buttons on the age report', await p.locator('button:has-text("Consult a biologist")').count() >= 2 && await p.locator('button:has-text("Biologist age")').count() >= 1);
+  const top = await p.locator('button:has-text("Biologist age")').first().boundingBox(); ok('top button is in the upper right', top.y < 250 && top.x > 200, top);
+  ok('bottom buttons too', await p.locator('text=Have a biologist age my deer').count() === 1);
+  await p.locator('button:has-text("Biologist age")').first().click(); await p.waitForSelector('#bdgo'); ok('dialog opens with price button', /Continue to payment/.test(await p.textContent('#bdgo')));
+  await p.click('#bdgo'); ok('asks to name a new deer', /Name the deer/.test(await p.textContent('#bde')));
+  await p.fill('#bdname', 'Report Buck'); await p.click('#bdgo'); await p.waitForTimeout(1500);
+  const bk = (await db.query("select b.id from bucks b join scans s on s.buck_id=b.id where s.id=$1 and b.name='Report Buck'", [sid])).rows; ok('new deer created and scan attached', bk.length === 1);
+  ok('payment failure shows a friendly message, dialog stays', /payment|snag|try again/i.test(await p.textContent('#bde')), await p.textContent('#bde'));
+  await db.query('delete from scans where id=$1', [sid]); await db.query("delete from bucks where name='Report Buck'"); }
 ok('no js errors', errs.length === 0); if (errs.length) console.log(errs); await b.close(); process.exit(fails ? 1 : 0);
