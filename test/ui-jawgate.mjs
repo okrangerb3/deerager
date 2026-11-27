@@ -1,0 +1,12 @@
+import { createRequire } from 'module'; const { chromium } = createRequire(import.meta.url)(process.env.PW || 'playwright');
+const BASE = process.env.BASE || 'http://localhost:3000'; let fails = 0; const ok = (n, c) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) fails++; };
+const T = (await (await fetch(BASE + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'admin@test.com', password: 'adminpass12' }) })).json()).token;
+const b = await chromium.launch(), p = await (await b.newContext({ viewport: { width: 420, height: 900 } })).newPage(), errs = []; p.on('pageerror', e => errs.push(e.message));
+await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), T); await p.reload(); await p.waitForSelector('nav');
+await p.evaluate(() => startCap('jaw')); await p.waitForTimeout(500);
+await p.evaluate(() => { S.files[0] = { blob: new Blob([new Uint8Array([255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 217])], { type: 'image/jpeg' }), url: '', ok: true, msg: '', busy: false }; S.sh[0] = 'Right cheek side, slightly from above'; analyze(); });
+await p.waitForSelector('#okdlg:not([hidden]) #okgo', { timeout: 8000 }); const t = await p.textContent('#okdlg');
+ok('asks for the missing jaw views', /Still needed/.test(t) && /Top-down/.test(t) && /Right side of the jaw/.test(t), t);
+ok('names what it saw and fixes a wrong side label', /left side view/.test(t) && /LEFT side/.test(t), t);
+await p.evaluate(() => { S.busy = false; });
+ok('no js errors', errs.length === 0, errs); await b.close(); process.exit(fails ? 1 : 0);

@@ -378,6 +378,12 @@ r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all start
   ok('photo type detected when not given', r.s === 200 && r.j.kinds && r.j.kinds[0] === 'jawbone', r.j);
   f = new FormData(); f.append('kind', 'rack'); f.append('photo', jpg(), 'b.jpg'); r = await call('POST', '/bucks/' + bid + '/photos', f, AD); ok('an explicit type is still honored', r.j.kinds[0] === 'rack', r.j);
   const kk = (await db.query('select kind from buck_photos where buck_id=$1 order by created_at', [bid])).rows.map(x => x.kind); ok('stored kinds match', kk.join() === 'jawbone,rack', kk); await db.query('delete from bucks where id=$1', [bid]); }
+// ---- jaw photo views
+{ let f = new FormData(); for (let i = 0; i < 2; i++) f.append('photos', jpg(), 'a.jpg'); r = await call('POST', '/photos/identify', f, AD);
+  ok('identify reports view and side per photo', r.s === 200 && r.j.photos.length === 2 && r.j.photos[0].kind === 'jawbone' && r.j.photos[0].view === 'side' && r.j.photos[0].side === 'left', r.j);
+  const m = r.j.missing.map(x => x.key).sort().join(); ok('missing right side and top are flagged as needed', m === 'close,right,top' && r.j.missing.filter(x => x.required).length === 2, r.j.missing);
+  r = await call('POST', '/bucks', { name: 'View Buck' }, AD); const bid = r.j.id; f = new FormData(); f.append('kind', 'auto'); f.append('photo', jpg(), 'a.jpg'); await call('POST', '/bucks/' + bid + '/photos', f, AD);
+  r = await call('GET', '/bucks/' + bid, null, AD); ok('buck shows what is missing from the jaw set', r.j.jaw_check && r.j.jaw_check.missing.some(x => x.key === 'right') && r.j.photo_list[0].side === 'left', r.j.jaw_check); await db.query('delete from bucks where id=$1', [bid]); }
 // ---- SEO
 { const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
   let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));
