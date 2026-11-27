@@ -55,4 +55,15 @@ const T = await tok('bio@test.com', 'correct-horse-9'), H = await tok('admin@tes
   const bk = (await db.query("select b.id from bucks b join scans s on s.buck_id=b.id where s.id=$1 and b.name='Report Buck'", [sid])).rows; ok('new deer created and scan attached', bk.length === 1);
   ok('payment failure shows a friendly message, dialog stays', /payment|snag|try again/i.test(await p.textContent('#bde')), await p.textContent('#bde'));
   await db.query('delete from scans where id=$1', [sid]); await db.query("delete from bucks where name='Report Buck'"); }
+
+// report knows which deer it belongs to
+{ const hu = (await db.query("select id from users where email='admin@test.com'")).rows[0].id, bk = (await db.query("insert into bucks(user_id,name) values($1,'Saved Buck') returning id", [hu])).rows[0].id;
+  const s1 = (await db.query("insert into scans(user_id,buck_id,mode,class,range,confidence,flags,observations) values($1,$2,'jaw','3.5','3.5-4.5',70,'{\"usable\":true}','{}') returning id", [hu, bk])).rows[0].id, s2 = (await db.query("insert into scans(user_id,mode,class,range,confidence,flags,observations) values($1,'jaw','3.5','3.5-4.5',70,'{\"usable\":true}','{}') returning id", [hu])).rows[0].id;
+  const p = await (await b.newContext({ viewport: { width: 420, height: 900 } })).newPage(); p.on('pageerror', e => errs.push(e.message));
+  await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), H); await p.reload(); await p.waitForSelector('nav');
+  await p.evaluate(id => openScan(id), s1); await p.waitForSelector('text=Saved to Saved Buck'); const t1 = await p.textContent('#app');
+  ok('scan under a deer says saved, no re-save button', /nothing more to save/i.test(t1) && !/Save to this deer/.test(t1) && /Open Saved Buck/.test(t1), [/nothing more to save/i.test(t1), /Save to this deer/.test(t1), /Open Saved Buck/.test(t1)]);
+  await p.evaluate(id => openScan(id), s2); await p.waitForSelector('text=Which deer is this'); ok('unassigned scan asks which deer', /Save to this deer/.test(await p.textContent('body')));
+  await p.selectOption('#rbk', 'new'); await p.fill('#rbname', 'Brand New'); await p.click('text=Save to this deer'); await p.waitForSelector('text=Saved to Brand New'); ok('naming a new deer saves and confirms', (await db.query("select 1 from scans s join bucks b on b.id=s.buck_id where s.id=$1 and b.name='Brand New'", [s2])).rowCount === 1);
+  await db.query('delete from scans where id in ($1,$2)', [s1, s2]); await db.query("delete from bucks where name in ('Saved Buck','Brand New')"); }
 ok('no js errors', errs.length === 0); if (errs.length) console.log(errs); await b.close(); process.exit(fails ? 1 : 0);
