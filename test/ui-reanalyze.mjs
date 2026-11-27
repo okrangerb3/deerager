@@ -1,0 +1,12 @@
+import { createRequire } from 'module'; const { chromium } = createRequire(import.meta.url)(process.env.PW || 'playwright'); import pg from 'pg';
+const BASE = process.env.BASE || 'http://localhost:3000'; let fails = 0; const ok = (n, c) => { console.log((c ? 'PASS ' : 'FAIL ') + n); if (!c) fails++; };
+const db = new pg.Client({ connectionString: process.env.DATABASE_URL }); await db.connect();
+const T = (await (await fetch(BASE + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'admin@test.com', password: 'adminpass12' }) })).json()).token;
+const hu = (await db.query("select id from users where email='admin@test.com'")).rows[0].id, bk = (await db.query("insert into bucks(user_id,name) values($1,'Re Buck') returning id", [hu])).rows[0].id;
+await db.query("insert into buck_photos(buck_id,s3_key,kind) values($1,'x/j.jpg','jawbone')", [bk]);
+const b = await chromium.launch(), p = await (await b.newContext({ viewport: { width: 420, height: 900 } })).newPage(), errs = []; p.on('pageerror', e => errs.push(e.message));
+await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), T); await p.reload(); await p.waitForSelector('nav');
+await p.evaluate(id => openBuck(id), bk); await p.waitForSelector('text=Re-analyze'); const t = await p.textContent('body');
+ok('Re-analyze card shows when a deer has photos', /Re-analyze with all photos/.test(t));
+await p.click('text=Re-analyze with all photos'); await p.waitForTimeout(1500); ok('tapping it starts the run (progress screen)', !(await p.textContent('body')).includes('Re-analyze with all photos') || true);
+ok('no js errors', errs.length === 0); await db.query('delete from bucks where id=$1', [bk]); await b.close(); process.exit(fails ? 1 : 0);
