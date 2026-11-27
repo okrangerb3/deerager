@@ -97,6 +97,54 @@ r = await call('POST', '/admin/models/test', null, AD); ok('admin model connecti
   r = await call('GET', '/bucks/' + pb, null, A); ok('deer now has a scan from saved photos', r.j.scan_list.length === 1, r.j.scan_list); await db.query('delete from bucks where id=$1', [pb]); }
   f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); r = await call('POST', '/scans', f, A); ok('no photos and no reuse rejected', r.s === 400, r);
   await db.query("delete from bucks where name='Rescan Ray'"); }
+// ---- biologist: consult (advice) and biologist age (formal), separate fees, standard report, payouts
+{ r = await call('PUT', '/admin/consults/settings', { consult_price_cents: 1500, age_price_cents: 3000, payout_pct: 70, sla_hours: 24 }, AD); ok('admin sets both consult fees', r.s === 200 && r.j.settings.age_price_cents === 3000 && r.j.settings.consult_price_cents === 1500, r);
+  r = await call('PUT', '/admin/consults/settings', { age_price_cents: 5 }, AD); ok('silly fee rejected', r.s === 400, r);
+  r = await signup('bio@test.com'); const BIO = r.j.token; await verify('bio@test.com'); const bioid = await uid('bio@test.com');
+  r = await call('GET', '/bio/queue', null, BIO); ok('hunter cannot open the biologist panel', r.s === 403, r);
+  r = await call('PATCH', '/admin/users/' + bioid, { role: 'biologist' }, AD); ok('admin makes a biologist', r.s === 200, r);
+  r = await call('GET', '/bio/queue', null, BIO); ok('biologist sees the queue', r.s === 200 && r.j.items.length === 0, r);
+  r = await call('GET', '/consult/info', null, A); ok('hunter sees both prices', r.s === 200 && r.j.age_price_cents === 3000 && r.j.consult_price_cents === 1500 && r.j.available === true, r);
+  r = await call('POST', '/bucks', { name: 'Consult Buck' }, A); const cb = r.j.id;
+  r = await call('POST', '/bucks/' + cb + '/consult', { kind: 'age' }, A); ok('no photos or scans, no consult', r.s === 400 && r.j.error === 'consult_needs_photos', r);
+  await db.query("insert into buck_photos(buck_id,s3_key,kind) values($1,'x/jaw1.jpg','jawbone')", [cb]);
+  r = await call('POST', '/bucks/' + cb + '/consult', { kind: 'consult', question: '' }, A); ok('consult needs a question', r.s === 400 && r.j.error === 'consult_needs_question', r);
+  r = await call('POST', '/bucks/' + cb + '/consult', { kind: 'age' }, A); ok('checkout failure is clean and leaves no stray row', r.s === 502 && (await db.query("select 1 from consults where buck_id=$1", [cb])).rowCount === 0, r);
+  const mk = async (kind, q2, price) => (await db.query("insert into consults(buck_id,hunter_id,question,price_cents,payout_pct,payout_cents,kind,checkout_session,status) values($1,$2,$3,$4,70,$5,$6,$7,'pending_payment') returning id", [cb, aid, q2, price, Math.round(price * .7), kind, 'cs_' + crypto.randomUUID()])).rows[0].id;
+  const idA = await mk('age', 'older than the scan?', 3000), idC = await mk('consult', 'Does his rack fit a 4 year old?', 1500);
+  const paid = id => hook('checkout.session.completed', { id: 'cs_x', mode: 'payment', payment_status: 'paid', payment_intent: 'pi_' + id.slice(0, 8), metadata: { consult_id: id } });
+  await paid(idA); await paid(idC); await paid(idA);
+  r = await call('GET', '/bio/queue', null, BIO); ok('both paid consults reach the queue once', r.s === 200 && r.j.items.length === 2 && r.j.items.some(x => x.kind === 'age' && x.payout_cents === 2100) && r.j.items.some(x => x.kind === 'consult' && x.payout_cents === 1050), r.j);
+  r = await call('GET', '/bucks/' + cb + '/consults', null, A); ok('hunter sees both as in the queue', r.j.length === 2 && r.j.every(x => x.status === 'open'), r.j);
+  r = await call('POST', '/bucks/' + cb + '/consult', { kind: 'age' }, A); ok('second age request while one is active is refused', r.s === 409, r);
+  r = await call('POST', '/bio/consults/' + idA + '/claim', null, BIO); ok('biologist claims the age request', r.s === 200, r);
+  r = await call('POST', '/bio/consults/' + idA + '/claim', null, BIO); ok('cannot claim twice', r.s === 409, r);
+  ok('claim creates the share row', (await db.query('select 1 from buck_shares where buck_id=$1 and to_user=$2', [cb, bioid])).rowCount === 1);
+  r = await call('GET', '/shared/' + cb, null, BIO); ok('shared view works for the biologist', r.s === 200 && r.j.name === 'Consult Buck', r);
+  r = await call('GET', '/bio/consults/' + idA, null, BIO); ok('case shows hunter first name only, photos and the form', r.s === 200 && r.j.hunter.first_name === 'Brent' && !JSON.stringify(r.j.hunter).includes('@') && r.j.photos.length === 1 && r.j.form.wear.length === 6 && r.j.kind === 'age', r.j);
+  r = await call('POST', '/bio/consults/' + idA + '/answer', { age: '4.5', confidence: 'high', data: { basis: 'jaw', quality: 'good', wear_m1: 'bogus' } }, BIO); ok('bad form value rejected', r.s === 400, r);
+  r = await call('POST', '/bio/consults/' + idA + '/answer', { age: '4.5', confidence: 'high' }, BIO); ok('age report needs the form basics', r.s === 400, r);
+  r = await call('POST', '/bio/suggest', { basis: 'jaw', p3: 'bi', m3: 'full', wear_m1: 'moderate' }, BIO); ok('suggested age from wear', r.j.age === '4.5', r.j);
+  r = await call('POST', '/bio/suggest', { basis: 'jaw', p3: 'tri', m3: 'erupting' }, BIO); ok('young tooth suggests 1.5', r.j.age === '1.5', r.j);
+  r = await call('POST', '/bio/consults/' + idA + '/answer', { age: '4.5', confidence: 'high', notes: 'Clean photos.', data: { basis: 'jaw', p3: 'bi', m3: 'full', wear_m1: 'moderate', wear_m2: 'slight', wear_m3: 'sharp', quality: 'good' } }, BIO); ok('biologist sends the standard age report', r.s === 200, r);
+  r = await call('GET', '/bucks/' + cb + '/consults', null, A); const ag = r.j.find(x => x.kind === 'age');
+  ok('hunter gets a standardized report', ag.status === 'answered' && ag.answer.age === '4.5' && ag.answer.notes.includes('Biologist age report') && ag.answer.notes.includes('Lower third premolar: two cusps') && ag.answer.notes.includes('first molar moderate') && ag.answer.notes.includes('Age: 4.5 years (confidence: high)') && ag.answer.notes.includes('Note: Clean photos.') && ag.answer.data.suggested === '4.5', ag);
+  r = await call('POST', '/bio/consults/' + idC + '/claim', null, BIO); r = await call('POST', '/bio/consults/' + idC + '/answer', { notes: 'short' }, BIO); ok('advice reply needs real words', r.s === 400, r);
+  r = await call('POST', '/bio/consults/' + idC + '/need-info', { text: 'Send a photo of the left side of the rack.' }, BIO); ok('biologist can ask for more', r.s === 200, r);
+  r = await call('POST', '/consults/' + idC + '/reply', { text: 'Added it.' }, A); ok('hunter replies, back to the biologist', r.s === 200, r);
+  r = await call('POST', '/bio/consults/' + idC + '/answer', { notes: 'Rack alone cannot tell age; 4 is plausible but 3 to 5 fits.' }, BIO); ok('biologist answers the question with no age', r.s === 200, r);
+  r = await call('GET', '/bucks/' + cb + '/consults', null, A); const cc = r.j.find(x => x.kind === 'consult'); ok('consult reply has no formal age', cc.status === 'answered' && cc.answer.age === null && cc.answer.notes.includes('3 to 5'), cc);
+  r = await call('GET', '/bio/earnings', null, BIO); ok('earnings show each deer separately', r.s === 200 && r.j.answered === 2 && r.j.earned === 3150 && r.j.owed === 3150 && r.j.paid === 0 && r.j.list.length === 2, r.j);
+  r = await call('GET', '/admin/consults', null, AD); ok('admin sees revenue, net and the biologist', r.s === 200 && r.j.totals.revenue === 4500 && r.j.totals.platform_net === 1350 && r.j.biologists.length === 1 && r.j.biologists[0].unpaid === 3150, r.j.totals);
+  r = await call('POST', '/admin/consults/' + idA + '/mark-paid', null, AD); ok('admin marks a payout paid', r.s === 200, r);
+  r = await call('GET', '/bio/earnings', null, BIO); ok('paid vs owed updates', r.j.paid === 2100 && r.j.owed === 1050, r.j);
+  r = await call('PATCH', '/admin/users/' + bioid, { payout_pct: 80 }, AD); ok('per-biologist share override', r.s === 200 && (await db.query('select payout_pct from users where id=$1', [bioid])).rows[0].payout_pct === 80);
+  r = await call('GET', '/bio/connect', null, BIO); ok('connect status is readable before setup', r.s === 200 && r.j.connected === false, r);
+  r = await call('POST', '/bio/connect', null, BIO); ok('connect fails cleanly when Stripe is unreachable', r.s === 502, r);
+  r = await call('PUT', '/bio/profile', { title: 'State wildlife biologist' }, BIO); ok('biologist sets a title', r.s === 200, r);
+  r = await call('GET', '/me', null, BIO); ok('biologist scans without a subscription', r.j.can_scan === true || r.j.stage === 'ready', r.j);
+  await db.query('delete from bucks where id=$1', [cb]); // keep later tests' buck ordering intact
+}
 // ---- named deer + deer photos on jaw scans
 { const dj = n => new Blob([Buffer.from('/9j/4AAQSkZJRg==', 'base64'), Buffer.from('deer' + n)], { type: 'image/jpeg' });
   let f = new FormData(); f.append('mode', 'jaw'); f.append('photos', jpg(), 'a.jpg'); f.append('deer_photos', dj(1), 'd.jpg');

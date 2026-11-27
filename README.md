@@ -63,3 +63,14 @@ Scans on a named deer are pooled into one running estimate on the buck page. Res
 
 ## Cost tracking
 Every model run records input/output tokens (from the vendor's usage report) and a dollar cost using rates you can edit in Admin > Costs. That tab shows spend by model, month-to-date and projected spend against an optional budget, storage (GB and cost), cost per user, and a calculator that turns your real cost per scan and storage per scan into the plan price needed for a target margin (including Stripe's fee).
+
+## Ask a biologist (two paid services)
+
+Hunters get two separate, one-time paid options on a deer's page, each with its own Stripe Checkout fee (set in Admin → Consults):
+
+- **Consult a biologist**: the hunter asks a question and gets a written reply. No formal age.
+- **Biologist age**: a formal age opinion. The biologist taps a short standard form (basis, P3 cusps, M3, wear on M1/M2/M3, optional cementum count, photo quality) and the app writes a standardized report. The form suggests a starting age; the biologist confirms or changes it and picks confidence.
+
+Flow: pay → webhook moves it to the queue → a biologist claims it (adds a `buck_shares` row so the normal shared view works) → answer, or ask the hunter for more, or release it → hunter is emailed. Hunters can cancel for a full refund before it is claimed.
+
+Biologists (role `biologist`, set in Admin → Consults) get every hunter feature free plus a Biologist panel: Queue, My consults, Earnings (earned, paid, owed, this month, every deer), and Payout setup (Stripe Connect Express hosted onboarding; Deer Ager never sees bank or card details). Their share defaults to 70% (per-biologist override). Payouts transfer automatically once their Stripe account is ready; otherwise admin uses "Mark paid". Stripe Connect must be enabled on the Stripe account.
