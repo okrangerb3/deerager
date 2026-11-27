@@ -80,3 +80,7 @@ Biologists (role `biologist`, set in Admin → Consults) get every hunter featur
 Managed in Admin → SEO (stored in the `seo` setting; changes show within ~15 seconds). `src/seo.ts` injects per-page title, description, canonical, Open Graph / Twitter tags and JSON-LD (Organization, WebSite, SoftwareApplication with live plan prices, FAQPage, BreadcrumbList) into the app shell, serves crawlable public pages (`/how-it-works`, `/deer-aging-guide`, `/boone-and-crockett-score`, `/faq`, `/pricing`), and generates `robots.txt` and `sitemap.xml`. Shared/private pages (`/s/`, `/b/`, `/c/`) are always noindex. Canonical URLs use `APP_URL`. Responses are gzip-compressed. Share image: `public/og.png` (1200x630).
 
 Admin → Analytics also shows scans per day (stacked jaw/deer, Central time) and scans by user.
+
+## Consistent readings
+
+Each model's call uses temperature 0 (or 0.5 when voting) and, for OpenAI, a fixed seed; if a model rejects those parameters the app retries without them. Admin → Settings → Analysis sets how many passes each model makes per scan (default 3). Passes are voted: molar wear is the median grade, the temporary-premolar flag is the majority, age probabilities are averaged, and confidence is lowered when the passes disagree (shown as "Agreement between readings" in the report). Results are cached by photo hash plus prompt version (`analysis_cache`), so identical photos always return the same answer at no cost. Run `node test/consistency.mjs` (needs the e2e database) to check this against a fake Anthropic server (`ANTHROPIC_URL`).
