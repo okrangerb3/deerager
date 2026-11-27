@@ -353,6 +353,22 @@ r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all start
   ok('scan stats add up', r.j.total === r.j.jaw + r.j.deer && r.j.daily.reduce((a, x) => a + x.jaw + x.deer, 0) === r.j.total && r.j.users.reduce((a, u) => a + u.scans, 0) === r.j.total, r.j);
   ok('scan stats per user have names and last scan', r.j.users.every(u => u.name && u.last_scan) && r.j.users[0].scans >= r.j.users[r.j.users.length - 1].scans);
   r = await call('GET', '/admin/scan-stats?days=7', null, A); ok('scan stats are admin only', r.s === 403, r); }
+// ---- regional wear curve (East Texas)
+{ r = await call('GET', '/admin/calibration', null, AD); ok('calibration loads with the seeded East Texas region', r.s === 200 && r.j.regions.some(g => g.id === 'east_tx_pineywoods' && g.shift === 0.5 && g.zip_prefixes.includes('757')), r.j.regions && r.j.regions.map(g => g.id));
+  r = await signup('tx@test.com', { zip: '75701', state: 'tx' }); const TX = r.j.token; await verify('tx@test.com'); const txid = await uid('tx@test.com'); await db.query("update users set sub_status='comped',plan_id='free' where id=$1", [txid]);
+  const jp = () => new Blob([Buffer.from('/9j/4AAQSkZJRg==', 'base64'), Buffer.from('tx' + Math.random())], { type: 'image/jpeg' }); const one = async tok => { const f = new FormData(); f.append('mode', 'jaw'); f.append('photos', jp(), 'a.jpg'); return call('POST', '/scans', f, tok); };
+  const sx = await one(TX), sd = await one(AD); const ob = async res => (await db.query('select observations from scans where id=$1', [res.j.id || res.j.scan_id || (res.j.scan && res.j.scan.id)])).rows[0]?.observations;
+  const ox = await ob(sx), od = await ob(sd);
+  ok('East Texas hunter gets the shifted curve', ox && ox.region && ox.region.shift === 0.5 && ox.dist.shift === 0.5 && ox.dist.raw_best, ox && ox.region);
+  ok('other hunters are not shifted', od && !od.region && od.dist.shift === 0, od && od.dist);
+  ok('shift moves weight older', ox.dist.probs['6.5+'] > od.dist.probs['6.5+'] && ox.dist.probs['3.5'] < od.dist.probs['3.5'], [ox.dist.probs, od.dist.probs]);
+  r = await call('PUT', '/admin/regions/east_tx_pineywoods', { name: 'East Texas Pineywoods', zip_prefixes: '756, 757, 758, 759, 773', shift: 3 }, AD); ok('shift above 2 rejected', r.s === 400, r);
+  r = await call('PUT', '/admin/regions/east_tx_pineywoods', { name: 'East Texas Pineywoods', zip_prefixes: '756, 757, abc, 758', shift: 1 }, AD); ok('region saved, bad zip prefixes dropped', r.s === 200, r);
+  r = await call('GET', '/admin/calibration', null, AD); const eg = r.j.regions.find(g => g.id === 'east_tx_pineywoods'); ok('region edit applies', eg.shift === 1 && eg.zip_prefixes.join() === '756,757,758' && eg.stats.scans >= 1, eg);
+  await call('POST', '/admin/scans/' + (sx.j.id || (sx.j.scan && sx.j.scan.id)) + '/truth', { truth_age: '5.5' }, AD); r = await call('GET', '/admin/calibration', null, AD); ok('graded scans feed the calibration stats', r.j.regions.find(g => g.id === 'east_tx_pineywoods').stats.graded >= 1, r.j.regions[0].stats);
+  r = await call('GET', '/admin/calibration', null, A); ok('calibration admin only', r.s === 403, r);
+  r = await call('PUT', '/admin/regions/test_region', { name: 'Test', zip_prefixes: '123', shift: 0.25 }, AD); ok('admin adds a region', r.s === 200, r); r = await call('DELETE', '/admin/regions/test_region', null, AD); ok('and deletes it', r.s === 200, r);
+  await call('PUT', '/admin/regions/east_tx_pineywoods', { name: 'East Texas Pineywoods', zip_prefixes: '755,756,757,758,759,773', shift: 0.5 }, AD); }
 // ---- SEO
 { const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
   let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));

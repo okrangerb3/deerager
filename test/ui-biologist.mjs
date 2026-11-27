@@ -66,4 +66,10 @@ const T = await tok('bio@test.com', 'correct-horse-9'), H = await tok('admin@tes
   await p.evaluate(id => openScan(id), s2); await p.waitForSelector('text=Which deer is this'); ok('unassigned scan asks which deer', /Save to this deer/.test(await p.textContent('body')));
   await p.selectOption('#rbk', 'new'); await p.fill('#rbname', 'Brand New'); await p.click('text=Save to this deer'); await p.waitForSelector('text=Saved to Brand New'); ok('naming a new deer saves and confirms', (await db.query("select 1 from scans s join bucks b on b.id=s.buck_id where s.id=$1 and b.name='Brand New'", [s2])).rowCount === 1);
   await db.query('delete from scans where id in ($1,$2)', [s1, s2]); await db.query("delete from bucks where name in ('Saved Buck','Brand New')"); }
+
+// calibration tab
+{ const p = await (await b.newContext({ viewport: { width: 900, height: 900 } })).newPage(); p.on('pageerror', e => errs.push(e.message));
+  await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), H); await p.reload(); await p.waitForSelector('nav');
+  await p.evaluate(() => { S.tab = 'calibration'; openAdmin(); }); await p.waitForSelector('text=Why this exists'); const t = await p.textContent('#adm');
+  ok('calibration tab shows the East Texas region and shift', /East Texas Pineywoods/.test(t) && /Shift 0\.5/.test(t) && /Add a region/.test(t)); }
 ok('no js errors', errs.length === 0); if (errs.length) console.log(errs); await b.close(); process.exit(fails ? 1 : 0);
