@@ -82,6 +82,19 @@ await hook('customer.subscription.updated', sub(aid, 'cus_A', 'active', 'price_a
   { const used0 = (await call('GET', '/me', null, A)).j.scans_used; r = await call('POST', `/bucks/${bid}/rerun`, null, A); ok('pull-together re-run is accepted and runs in the background', r.s === 202 && r.j.pending && r.j.id, r); { const rid = r.j.id; for (let i = 0; i < 40; i++) { await new Promise(x => setTimeout(x, 250)); r = await call('GET', '/scans/' + rid, null, A); if (!r.j.pending) break; } ok('re-run finishes with a result', r.s === 200 && !r.j.pending && !r.j.failed && r.j.id === rid, r.j); }
     ok('re-run is free', (await call('GET', '/me', null, A)).j.scans_used === used0); r = await call('GET', '/bucks/' + bid, null, A); const c2 = r.j.age_case; ok('re-run replaces earlier scans in the case', c2.n_used === 1 && c2.n_total >= 4, c2);
     r = await call('POST', `/bucks/00000000-0000-0000-0000-000000000000/rerun`, null, A); ok('re-run of unknown deer 404', r.s === 404, r); }
+{ r = await call('POST', '/bucks', { name: 'Photos Only' }, AD); const pid = r.j.id; let pf2 = new FormData(); pf2.append('kind', 'jawbone'); pf2.append('photo', jpg(), 'j.jpg'); await call('POST', `/bucks/${pid}/photos`, pf2, AD);
+  r = await call('POST', `/bucks/${pid}/rerun`, null, AD); ok('deer with only saved photos can be analyzed', r.s === 202 && r.j.id, r); const rid = r.j.id; for (let i = 0; i < 40; i++) { await new Promise(x => setTimeout(x, 250)); r = await call('GET', '/scans/' + rid, null, AD); if (!r.j.pending) break; }
+  ok('photos-only analysis finishes', r.s === 200 && !r.j.pending && !r.j.failed, r.j); r = await call('GET', '/bucks/' + pid, null, AD); ok('age case appears for photos-only deer', r.j.age_case && r.j.age_case.dist, r.j.age_case); await db.query('delete from bucks where id=$1', [pid]); }
+r = await call('GET', '/admin/costs', null, AD); ok('costs report loads with token counts', r.s === 200 && +r.j.totals.in_tok > 0 && r.j.by_model.length >= 1 && Array.isArray(r.j.users) && r.j.storage.bytes >= 0, r.j.totals);
+r = await call('PUT', '/admin/costs/settings', { prices: { 'mock-claude': { in: 3, out: 15 } }, storage_gb: 0.02, budget: 50 }, AD); ok('cost rates saved', r.s === 200, r);
+r = await call('POST', '/scans', scanForm('jaw'), AD); r = await call('GET', '/admin/costs', null, AD); ok('cost recorded once a rate is set', r.j.totals.tracked >= 1 && r.j.totals.cost > 0 && r.j.tracked.cost > 0, r.j.totals);
+r = await call('PUT', '/admin/costs/settings', { prices: { 'bad name!': { in: 1, out: 1 } } }, AD); ok('bad model name rejected', r.s === 400, r);
+r = await call('GET', '/admin/costs', null, AD); ok('saved rates and budget returned', r.j.prices['mock-claude'].in === 3 && r.j.storage_gb === 0.02 && r.j.budget === 50, r.j.prices['mock-claude']);
+r = await call('GET', '/admin/costs', null, A); ok('costs are admin only', r.s === 403 || r.s === 401, r.s);
+r = await call('POST', '/admin/models/test', null, AD); ok('admin model connection test runs', r.s === 200 && Array.isArray(r.j) && r.j.length === 3 && r.j.every(x => x.ok), r.j);
+{ r = await call('POST', '/bucks', { name: 'Photos Only' }, A); const pb = r.j.id; const f = new FormData(); f.append('photos', new Blob([Buffer.from('/9j/4AAQSkZJRg==', 'base64'), Buffer.from('po1')], { type: 'image/jpeg' }), 'a.jpg'); r = await call('POST', `/bucks/${pb}/photos`, f, A); ok('photos saved to a deer with no scans', r.s === 200, r);
+  r = await call('POST', `/bucks/${pb}/rerun`, { saved: true, mode: 'jaw' }, A); ok('analyze saved photos accepted', r.s === 202 && r.j.id, r); const rid = r.j.id; for (let i = 0; i < 40; i++) { await new Promise(x => setTimeout(x, 250)); r = await call('GET', '/scans/' + rid, null, A); if (!r.j.pending) break; } ok('saved-photo analysis finishes', r.s === 200 && !r.j.pending && !r.j.failed, r.j);
+  r = await call('GET', '/bucks/' + pb, null, A); ok('deer now has a scan from saved photos', r.j.scan_list.length === 1, r.j.scan_list); await db.query('delete from bucks where id=$1', [pb]); }
   f = new FormData(); f.append('mode', 'jaw'); f.append('buck_id', bid); r = await call('POST', '/scans', f, A); ok('no photos and no reuse rejected', r.s === 400, r);
   await db.query("delete from bucks where name='Rescan Ray'"); }
 // ---- named deer + deer photos on jaw scans
@@ -267,12 +280,5 @@ r = await call('POST', `/admin/partners/${PID}/rotate`, null, AD); const PK2 = r
 r = await call('GET', '/v1/me', null, PK); ok('old key stops working', r.s === 401, r);
 await call('PUT', '/admin/partners/' + PID, { webhook_url: '', active: false }, AD); r = await call('GET', '/v1/me', null, PK2); ok('disabled partner rejected', r.s === 401, r);
 r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all starts', r.s === 200 && r.j.ok, r); for (let i = 0; i < 60; i++) { await new Promise(x => setTimeout(x, 500)); r = await call('GET', '/admin/rerun-all', null, AD); if (!r.j.running) break; } ok('admin re-run all finishes', r.j.running === false && r.j.finished, r.j);
-r = await call('GET', '/admin/costs', null, AD); ok('costs report loads with token counts', r.s === 200 && +r.j.totals.in_tok > 0 && r.j.by_model.length >= 1 && Array.isArray(r.j.users) && r.j.storage.bytes >= 0, r.j.totals);
-r = await call('PUT', '/admin/costs/settings', { prices: { 'mock-claude': { in: 3, out: 15 } }, storage_gb: 0.02, budget: 50 }, AD); ok('cost rates saved', r.s === 200, r);
-r = await call('POST', '/scans', scanForm('jaw'), AD); r = await call('GET', '/admin/costs', null, AD); ok('cost recorded once a rate is set', r.j.totals.tracked >= 1 && r.j.totals.cost > 0 && r.j.tracked.cost > 0, r.j.totals);
-r = await call('PUT', '/admin/costs/settings', { prices: { 'bad name!': { in: 1, out: 1 } } }, AD); ok('bad model name rejected', r.s === 400, r);
-r = await call('GET', '/admin/costs', null, AD); ok('saved rates and budget returned', r.j.prices['mock-claude'].in === 3 && r.j.storage_gb === 0.02 && r.j.budget === 50, r.j.prices['mock-claude']);
-r = await call('GET', '/admin/costs', null, A); ok('costs are admin only', r.s === 403 || r.s === 401, r.s);
-r = await call('POST', '/admin/models/test', null, AD); ok('admin model connection test runs', r.s === 200 && Array.isArray(r.j) && r.j.length === 3 && r.j.every(x => x.ok), r.j);
 hs.close();
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED'); await db.end(); process.exit(fails ? 1 : 0);

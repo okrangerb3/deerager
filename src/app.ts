@@ -359,24 +359,27 @@ async function ingest(c: any, u: any, x: any = {}): Promise<any> {
   return { scan: r.scan, out: { ...(await report(r.scan)), buck_id: buck?.id || null, deer_photos: dstored.length, free_retake: !!retake, needs_more_photos: r.needs_more, storage_down: storageDown } };
 }
 // Pull every earlier jaw scan of a deer together: all their photos (newest first, up to 8) plus saved deer photos, re-run through the current analysis. Free, and replaces the earlier scans in the age case.
-async function rollupBuck(u: any, buckId: string, background = false): Promise<any> {
+async function rollupBuck(u: any, buckId: string, background = false, opt: any = {}): Promise<any> {
+  const smode = opt.mode === 'deer' ? 'deer' : 'jaw';
   const [buck] = await q('select id from bucks where id=$1 and user_id=$2', [buckId, u.id]); if (!buck) return { error: 'not_found' };
-  const ph = await q("select p.s3_key,p.bytes,p.sha from photos p join scans s on s.id=p.scan_id where s.buck_id=$1 and s.mode='jaw' order by s.created_at desc,p.slot", [buck.id]);
+  const ph = opt.saved ? await q("select s3_key,bytes,null sha from buck_photos where buck_id=$1 order by created_at desc limit 8", [buck.id]) : await q("select p.s3_key,p.bytes,p.sha from photos p join scans s on s.id=p.scan_id where s.buck_id=$1 and s.mode='jaw' order by s.created_at desc,p.slot", [buck.id]); // 'saved' = he has photos in his log but no scan yet
   const seen = new Set<string>(), imgs: any[] = [], stored: any[] = [];
   for (const p of ph as any[]) { if (imgs.length >= 8 || seen.has(p.s3_key)) continue; seen.add(p.s3_key); try { imgs.push({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') }); stored.push(p); } catch (e: any) { console.error('rollup read failed', e.message); } }
+  if (imgs.length < 8) { const bp = await q("select s3_key,bytes from buck_photos where buck_id=$1 and kind<>'field' order by created_at desc limit 8", [buck.id]); // photos saved straight to the deer, with no scan yet
+    for (const p of bp as any[]) { if (imgs.length >= 8 || seen.has(p.s3_key)) continue; seen.add(p.s3_key); try { imgs.push({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') }); stored.push({ s3_key: p.s3_key, bytes: p.bytes, sha: null }); } catch (e: any) { console.error('rollup read failed', e.message); } } }
   if (!imgs.length) return { error: 'no_photos' };
-  const jawN = imgs.length, fp = await q("select s3_key from buck_photos where buck_id=$1 and kind='field' order by created_at desc limit 4", [buck.id]); let nf = 0;
+  const jawN = imgs.length, fp = opt.saved ? [] : await q("select s3_key from buck_photos where buck_id=$1 and kind='field' order by created_at desc limit 4", [buck.id]); let nf = 0;
   for (const p of fp as any[]) { try { imgs.push({ mime: 'image/jpeg', b64: Buffer.from(await s3.file(p.s3_key).arrayBuffer()).toString('base64') }); nf++; } catch {} }
   if (nf) (imgs as any).note = `\n\nNOTE: the last ${nf} photo(s) show the live animal (not the jaw). Use them only as weak supporting evidence; the jaw tooth wear takes precedence, and do not raise confidence because of them.\n\n`;
   const [last] = await q("select id from scans where buck_id=$1 and mode='jaw' order by created_at desc limit 1", [buck.id]);
-  const [s0] = await q('insert into scans(user_id,buck_id,mode,flags,counted,reuse_of,rollup) values($1,$2,$3,$4,true,$5,true) returning *', [u.id, buck.id, 'jaw', { usable: false, pending: true }, last?.id || null]);
+  const [s0] = await q('insert into scans(user_id,buck_id,mode,flags,counted,reuse_of,rollup) values($1,$2,$3,$4,true,$5,$6) returning *', [u.id, buck.id, smode, { usable: false, pending: true }, opt.saved ? null : last?.id || null, smode === 'jaw']);
   for (const [i, p] of stored.entries()) await q('insert into photos(scan_id,s3_key,slot,bytes,sha) values($1,$2,$3,$4,$5)', [s0.id, p.s3_key, i, p.bytes || 0, p.sha || null]);
   if (background) { runAnalysis(s0, u, imgs).catch((e: any) => console.error('rollup analysis crashed', e?.message)); return { scan_id: s0.id, pending: true }; } // runs on after the request ends, so a closed phone or dropped connection cannot lose it
   const r: any = await runAnalysis(s0, u, imgs); if (r.error) return { error: r.error, scan_id: s0.id };
   return { scan: r.scan, out: { ...(await report(r.scan)), buck_id: buck.id, photos_used: jawN, deer_photos: nf } };
 }
 app.post('/api/bucks/:id/rerun', auth, gate, async c => { const u = c.get('user'); if (!ACTIVE.includes(u.sub_status) && u.role !== 'admin') return c.json({ error: 'subscription_required' }, 402);
-  const r = await rollupBuck(u, c.req.param('id'), true); if (r.error) return r.error === 'not_found' ? c.json({ error: 'not_found' }, 404) : r.error === 'no_photos' ? c.json({ error: 'no_photos' }, 400) : fail(c, r, r.scan_id); return c.json({ id: r.scan_id, pending: true, buck_id: c.req.param('id') }, 202); });
+  const bd = await c.req.json().catch(() => ({})), r = await rollupBuck(u, c.req.param('id'), true, { mode: bd.mode, saved: !!bd.saved }); if (r.error) return r.error === 'not_found' ? c.json({ error: 'not_found' }, 404) : r.error === 'no_photos' ? c.json({ error: 'no_photos' }, 400) : fail(c, r, r.scan_id); return c.json({ id: r.scan_id, pending: true, buck_id: c.req.param('id') }, 202); });
 app.post('/api/scans', auth, async c => { const r = await ingest(c, c.get('user')); return r instanceof Response ? r : c.json(r.out); });
 app.post('/api/scans/:id/reanalyze', auth, gate, async c => { const u = c.get('user'), s = await mine(c); if (!s) return c.json({ error: 'not_found' }, 404); if (!canScan(u)) return c.json({ error: 'subscription_required' }, 402);
   const ph = await q('select s3_key from photos where scan_id=$1 order by slot', [s.id]); if (!ph.length) return c.json({ error: 'no_photos' }, 400);
