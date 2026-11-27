@@ -74,3 +74,9 @@ Hunters get two separate, one-time paid options on a deer's page, each with its 
 Flow: pay → webhook moves it to the queue → a biologist claims it (adds a `buck_shares` row so the normal shared view works) → answer, or ask the hunter for more, or release it → hunter is emailed. Hunters can cancel for a full refund before it is claimed.
 
 Biologists (role `biologist`, set in Admin → Consults) get every hunter feature free plus a Biologist panel: Queue, My consults, Earnings (earned, paid, owed, this month, every deer), and Payout setup (Stripe Connect Express hosted onboarding; Deer Ager never sees bank or card details). Their share defaults to 70% (per-biologist override). Payouts transfer automatically once their Stripe account is ready; otherwise admin uses "Mark paid". Stripe Connect must be enabled on the Stripe account.
+
+## SEO
+
+Managed in Admin → SEO (stored in the `seo` setting; changes show within ~15 seconds). `src/seo.ts` injects per-page title, description, canonical, Open Graph / Twitter tags and JSON-LD (Organization, WebSite, SoftwareApplication with live plan prices, FAQPage, BreadcrumbList) into the app shell, serves crawlable public pages (`/how-it-works`, `/deer-aging-guide`, `/boone-and-crockett-score`, `/faq`, `/pricing`), and generates `robots.txt` and `sitemap.xml`. Shared/private pages (`/s/`, `/b/`, `/c/`) are always noindex. Canonical URLs use `APP_URL`. Responses are gzip-compressed. Share image: `public/og.png` (1200x630).
+
+Admin → Analytics also shows scans per day (stacked jaw/deer, Central time) and scans by user.

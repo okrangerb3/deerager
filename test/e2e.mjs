@@ -260,7 +260,7 @@ ok('bots are ignored', (await hit({ path: '/splash', landing: true }, 'Googlebot
 await hit({ path: '/signup-step1' }); r = await call('GET', '/admin/analytics?days=30', null, AD); ok('admin analytics: visitors, sources, pages, devices', r.j.visitors === 1 && r.j.views === 2 && r.j.sources[0].src === 'fb' && r.j.devices[0].k === 'mobile' && r.j.pages.length === 2, r.j);
 r = await call('GET', '/admin/analytics', null, M); ok('analytics is admin-only', r.s === 403, r);
 // --- SEO
-const home = await (await fetch(BASE + '/')).text(); ok('landing page is SEO-ready (title, description, canonical, schema, h1, OG)', ['<title>Deer Ager | Estimate', 'name="description"', 'rel="canonical"', 'application/ld+json', "<h1>Estimate a Deer's Age", 'og:title', 'How it works'].every(t => home.includes(t)));
+const home = await (await fetch(BASE + '/')).text(); ok('landing page is SEO-ready (title, description, canonical, schema, h1, OG)', ['<title>Deer Ager: Age a Deer', 'name="description"', 'rel="canonical"', 'application/ld+json', "<h1>Estimate a Deer's Age", 'og:title', 'How it works'].every(t => home.includes(t)));
 ok('robots.txt + sitemap.xml', (await (await fetch(BASE + '/robots.txt')).text()).includes('Disallow: /api/') && (await (await fetch(BASE + '/sitemap.xml')).text()).includes('<urlset'));
 ok('shared report pages are noindex', (await fetch(BASE + '/s/abc')).headers.get('x-robots-tag') === 'noindex');
 // --- buck points, photos, attach scans
@@ -348,5 +348,30 @@ r = await call('POST', `/admin/partners/${PID}/rotate`, null, AD); const PK2 = r
 r = await call('GET', '/v1/me', null, PK); ok('old key stops working', r.s === 401, r);
 await call('PUT', '/admin/partners/' + PID, { webhook_url: '', active: false }, AD); r = await call('GET', '/v1/me', null, PK2); ok('disabled partner rejected', r.s === 401, r);
 r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all starts', r.s === 200 && r.j.ok, r); for (let i = 0; i < 60; i++) { await new Promise(x => setTimeout(x, 500)); r = await call('GET', '/admin/rerun-all', null, AD); if (!r.j.running) break; } ok('admin re-run all finishes', r.j.running === false && r.j.finished, r.j);
+// ---- scans per day / per user
+{ r = await call('GET', '/admin/scan-stats?days=14', null, AD); ok('scan stats load', r.s === 200 && r.j.daily.length === 14 && r.j.total >= 1 && r.j.users.length >= 1, r.j.total);
+  ok('scan stats add up', r.j.total === r.j.jaw + r.j.deer && r.j.daily.reduce((a, x) => a + x.jaw + x.deer, 0) === r.j.total && r.j.users.reduce((a, u) => a + u.scans, 0) === r.j.total, r.j);
+  ok('scan stats per user have names and last scan', r.j.users.every(u => u.name && u.last_scan) && r.j.users[0].scans >= r.j.users[r.j.users.length - 1].scans);
+  r = await call('GET', '/admin/scan-stats?days=7', null, A); ok('scan stats are admin only', r.s === 403, r); }
+// ---- SEO
+{ const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
+  let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));
+  ok('home still contains the crawlable article and FAQ', /Frequently asked questions/.test(x.t) && /Know exactly what you harvested/.test(x.t) && !/SEO_HEAD|SEO_FAQ/.test(x.t));
+  for (const [p, h1] of [['/how-it-works', 'How Deer Ager works'], ['/deer-aging-guide', 'How to age a deer by its jawbone'], ['/boone-and-crockett-score', 'Boone and Crockett score explained'], ['/faq', 'Frequently asked questions'], ['/pricing', 'Deer Ager pricing']]) { x = await txt(p); ok('public page ' + p, x.s === 200 && x.t.includes('<h1>' + h1) && x.t.includes('rel="canonical"') && x.t.includes('BreadcrumbList'), x.s); }
+  x = await txt('/robots.txt'); ok('robots allows site, blocks private paths, lists sitemap', /Allow: \//.test(x.t) && /Disallow: \/api\//.test(x.t) && /Disallow: \/s\//.test(x.t) && /Sitemap: .*\/sitemap\.xml/.test(x.t), x.t);
+  x = await txt('/sitemap.xml'); ok('sitemap lists the public pages', (x.t.match(/<loc>/g) || []).length === 6 && /how-it-works/.test(x.t) && /pricing/.test(x.t), x.t);
+  x = await txt('/s/abc'); ok('shared pages are noindex', x.h.get('x-robots-tag') === 'noindex' && /content="noindex,nofollow"/.test(x.t));
+  x = await fetch(BASE + '/og.png'); ok('share image served', x.status === 200 && x.headers.get('content-type') === 'image/png');
+  r = await call('GET', '/admin/seo', null, AD); ok('admin SEO loads with health and pages', r.s === 200 && r.j.pages.length === 6 && r.j.health.checks.length > 5 && r.j.faq.length >= 3, r.j.health && r.j.health.score);
+  r = await call('GET', '/admin/seo', null, A); ok('SEO admin only', r.s === 403, r);
+  r = await call('PUT', '/admin/seo', { pages: { '/faq': { title: 'Custom FAQ Title For Hunters | Deer Ager', description: 'My custom description for the FAQ page that is long enough to be useful to searchers.' } }, settings: { gsc: 'abc123-XYZ', twitter: '@deerager', keywords: 'deer, age' } }, AD); ok('admin saves SEO', r.s === 200, r);
+  x = await txt('/faq'); ok('custom title and description appear', /<title>Custom FAQ Title For Hunters \| Deer Ager<\/title>/.test(x.t) && /My custom description for the FAQ page/.test(x.t) && /google-site-verification" content="abc123-XYZ"/.test(x.t) && /twitter:site" content="@deerager"/.test(x.t));
+  r = await call('PUT', '/admin/seo', { faq: [{ q: 'Does it work on old jaws?', a: 'Yes, within limits.' }] }, AD); x = await txt('/faq'); const hm = await txt('/'); ok('FAQ edit shows on FAQ page, home and schema', /Does it work on old jaws\?/.test(x.t) && /Does it work on old jaws\?/.test(hm.t) && !/How do you age a deer by its jawbone\?/.test(x.t));
+  r = await call('PUT', '/admin/seo', { pages: { '/pricing': { noindex: true } } }, AD); x = await txt('/pricing'); const sm = await txt('/sitemap.xml'); ok('hiding a page sets noindex and drops it from the sitemap', /content="noindex,nofollow"/.test(x.t) && !/pricing/.test(sm.t));
+  r = await call('PUT', '/admin/seo', { settings: { og_image: 'javascript:alert(1)' } }, AD); ok('bad image url rejected', r.s === 400, r);
+  r = await call('PUT', '/admin/seo', { settings: { robots_extra: 'Disallow: /tmp/\nUser-agent: evil\nNoindex: /' } }, AD); x = await txt('/robots.txt'); ok('robots extras filtered to allow/disallow lines', /Disallow: \/tmp\//.test(x.t) && !/evil/.test(x.t) && !/Noindex/.test(x.t), x.t);
+  r = await call('PUT', '/admin/seo', { settings: { index: false } }, AD); x = await txt('/robots.txt'); const h2 = await txt('/'); ok('indexing off blocks robots, meta and headers', /Disallow: \/\n/.test(x.t) && !/Allow: \//.test(x.t) && h2.h.get('x-robots-tag') === 'noindex' && /noindex,nofollow/.test(h2.t));
+  r = await call('PUT', '/admin/seo', { settings: { index: true }, pages: { '/pricing': { noindex: false } } }, AD); x = await txt('/'); ok('indexing back on', /index,follow/.test(x.t));
+  await db.query("delete from settings where key='seo'"); }
 hs.close();
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED'); await db.end(); process.exit(fails ? 1 : 0);

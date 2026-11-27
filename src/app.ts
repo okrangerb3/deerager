@@ -1,5 +1,5 @@
 // DeerAger: API + web app (Bun + Hono + Postgres + S3 + Stripe + Resend)
-import { AsyncLocalStorage } from 'node:async_hooks'; import { Hono } from 'hono'; import bcrypt from 'bcryptjs'; import jwt from 'jsonwebtoken'; import crypto from 'crypto'; import Stripe from 'stripe'; import pg from 'pg';
+import { AsyncLocalStorage } from 'node:async_hooks'; import { Hono } from 'hono'; import bcrypt from 'bcryptjs'; import jwt from 'jsonwebtoken'; import crypto from 'crypto'; import Stripe from 'stripe'; import pg from 'pg'; import { mountSeo } from './seo'; import { compress } from 'hono/compress';
 const env = process.env;
 const asset = (n: string) => Bun.file(new URL('../public/' + n, import.meta.url)).text();
 const HTML = await asset('index.html'), LOGO = await asset('logo.svg'), LOGOFULL = await asset('logo-full.svg');
@@ -140,6 +140,7 @@ const wantsBilling = (u: any) => u.prefs?.billing !== false;
 
 // ---------- app, security, auth
 const app = new Hono();
+app.use('*', compress());
 app.use('*', async (c, next) => { await next(); c.header('x-content-type-options', 'nosniff'); c.header('x-frame-options', 'DENY'); c.header('referrer-policy', 'strict-origin-when-cross-origin'); c.header('strict-transport-security', 'max-age=31536000; includeSubDomains'); c.header('permissions-policy', 'camera=(self), microphone=(), geolocation=()');
   c.header('content-security-policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"); if (c.req.path.startsWith('/api')) c.header('cache-control', 'no-store'); });
 const hits = new Map<string, number[]>();
@@ -167,10 +168,8 @@ app.post('/api/hit', async c => { if (limited(c, 'hit', 300)) return c.body(null
   let ref = ''; try { ref = b.ref ? new URL(b.ref).hostname.replace(/^www\./, '') : ''; } catch {} if (ref && env.APP_URL && ref === new URL(env.APP_URL).hostname.replace(/^www\./, '')) ref = '';
   const dev = /ipad|tablet/i.test(ua) ? 'tablet' : /mobi|android|iphone/i.test(ua) ? 'mobile' : 'desktop', t = (v: any) => (v ? String(v).slice(0, 80) : null);
   await q('insert into visits(path,ref,utm_source,utm_medium,utm_campaign,visitor,device,country,landing) values($1,$2,$3,$4,$5,$6,$7,$8,$9)', [t(b.path), ref || null, t(b.source), t(b.medium), t(b.campaign), visitor, dev, t(c.req.header('cf-ipcountry')), !!b.landing]); return c.body(null, 204); });
-app.get('/robots.txt', c => c.text(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /s/\nSitemap: ${env.APP_URL || 'https://deerager.com'}/sitemap.xml\n`));
-app.get('/sitemap.xml', c => c.body(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${env.APP_URL || 'https://deerager.com'}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url></urlset>`, 200, { 'content-type': 'application/xml' }));
 app.get('/health', c => c.text('ok'));
-app.get('/', c => c.html(HTML)); app.get('/s/:t', c => { c.header('x-robots-tag', 'noindex'); return c.html(HTML); });
+const OGIMG = Bun.file(new URL('../public/og.png', import.meta.url)); app.get('/og.png', async c => c.body(await OGIMG.arrayBuffer(), 200, { 'content-type': 'image/png', 'cache-control': 'public,max-age=86400' }));
 app.get('/logo.svg', c => c.body(LOGO, 200, { 'content-type': 'image/svg+xml', 'cache-control': 'public,max-age=86400' }));
 app.get('/logo-full.svg', c => c.body(LOGOFULL, 200, { 'content-type': 'image/svg+xml', 'cache-control': 'public,max-age=86400' }));
 
@@ -280,7 +279,6 @@ app.post('/api/bucks/:id/share', auth, gate, async c => { const b = await ownBuc
 const photoResp = async (k: string) => { try { const f = s3.file(k); return new Response(await f.arrayBuffer(), { headers: { 'content-type': f.type || 'image/jpeg', 'cache-control': 'private, max-age=3600', 'x-robots-tag': 'noindex' } }); } catch { return new Response('not found', { status: 404 }); } };
 app.get('/api/bshare/:t', async c => { const [b] = await q('select * from bucks where share_token=$1', [c.req.param('t')]); return b ? c.json(await buckSheet(b, 3600, (k: string) => `/api/bshare/${b.share_token}/p?k=${encodeURIComponent(k)}`)) : c.json({ error: 'not_found' }, 404); });
 app.get('/api/bshare/:t/p', async c => { const [b] = await q('select id from bucks where share_token=$1', [c.req.param('t')]), k = c.req.query('k') || ''; if (!b || !(await q('select 1 from buck_photos where buck_id=$1 and s3_key=$2 union all select 1 from photos p join scans s on s.id=p.scan_id where s.buck_id=$1 and p.s3_key=$2 limit 1', [b.id, k])).length) return c.json({ error: 'not_found' }, 404); return photoResp(k); });
-app.get('/b/:t', c => { c.header('x-robots-tag', 'noindex'); return c.html(HTML); });
 app.post('/api/bucks/:id/email', auth, gate, async c => { if (limited(c, 'em', 20)) return c.json({ error: 'rate_limited' }, 429); const b = await ownBuck(c); if (!b) return c.json({ error: 'not_found' }, 404); const u = c.get('user');
   const bj: any = await c.req.json().catch(() => ({})), to = [...new Set((bj.to || []).map((x: string) => String(x).trim().toLowerCase()).filter((x: string) => /^\S+@\S+\.\S+$/.test(x)))].slice(0, 5) as string[]; if (!to.length) return c.json({ error: 'invalid_input' }, 400);
   let t = b.share_token; if (!t) { t = crypto.randomBytes(16).toString('hex'); await q('update bucks set share_token=$1 where id=$2', [t, b.id]); }
@@ -479,7 +477,6 @@ V1.post('/capture-links', async c => { const p = c.get('partner'), b = await c.r
   return c.json({ url: `${env.APP_URL}/c/${t}`, expires_in_hours: hrs }); });
 app.route('/api/v1', V1);
 app.onError((e: any, c: any) => { console.error('unhandled', c.req.method, c.req.path, e?.stack || e?.message || e); return c.json({ error: 'server_error', ...(c.get('user')?.role === 'admin' ? { detail: String(e?.message || e).slice(0, 160) } : {}) }, 500); });
-app.get('/c/:t', c => { c.header('x-robots-tag', 'noindex'); return c.html(HTML); });
 const capLink = async (t: string) => (await q('select l.*,p.name partner_name,p.active from capture_links l join partners p on p.id=l.partner_id where l.token=$1 and l.expires_at>now()', [t]))[0];
 app.get('/api/c/:t', async c => { const l = await capLink(c.req.param('t')); return l && l.active ? c.json({ mode: l.mode, partner: l.partner_name, return_url: l.return_url, left: l.max_uses - l.used }) : c.json({ error: 'not_found' }, 404); });
 app.post('/api/c/:t/scan', async c => { if (limited(c, 'cap', 20)) return c.json({ error: 'rate_limited' }, 429); const l = await capLink(c.req.param('t')); if (!l || !l.active || l.used >= l.max_uses) return c.json({ error: 'link_expired' }, 410);
@@ -644,6 +641,12 @@ A.post('/users/:id/grant', async c => { const { on } = await c.req.json(), id = 
   if (on) { if (['active', 'trialing'].includes(u.sub_status)) return c.json({ error: 'has_subscription' }, 409); await q("update users set plan_id='free',sub_status='comped' where id=$1", [id]); }
   else await q("update users set plan_id='trial',sub_status='none' where id=$1 and sub_status='comped'", [id]);
   await audit(c.get('user').id, on ? 'grant_free' : 'revoke_free', { target: id }); return c.json({ ok: true }); });
+A.get('/scan-stats', async c => { const d = Math.min(Math.max(+(c.req.query('days') || 30), 1), 365), tz = 'America/Chicago';
+  const days = await q(`select to_char(g.dy,'Mon DD') label,to_char(g.dy,'Dy') dow,to_char(g.dy,'YYYY-MM-DD') iso,coalesce(x.jaw,0)::int jaw,coalesce(x.deer,0)::int deer,coalesce(x.users,0)::int users from generate_series(((now() at time zone $2)::date - ($1::int-1)),(now() at time zone $2)::date,'1 day') g(dy) left join (select (created_at at time zone $2)::date as dy,count(*) filter (where mode='jaw') jaw,count(*) filter (where mode<>'jaw') deer,count(distinct user_id) users from scans where created_at>now()-(($1::int+1)||' days')::interval and (flags->>'pending') is distinct from 'true' group by 1) x on x.dy=g.dy::date order by g.dy`, [d, tz]);
+  const users = await q(`select u.id,u.first_name,u.last_name,u.email,count(*)::int scans,count(*) filter (where s.mode='jaw')::int jaw,count(*) filter (where s.mode<>'jaw')::int deer,max(s.created_at) last_scan,count(distinct (s.created_at at time zone $2)::date)::int active_days from scans s join users u on u.id=s.user_id where s.created_at>now()-($1||' days')::interval and (s.flags->>'pending') is distinct from 'true' group by u.id order by scans desc,last_scan desc limit 200`, [String(d), tz]);
+  const tot = days.reduce((a: any, x: any) => ({ jaw: a.jaw + x.jaw, deer: a.deer + x.deer }), { jaw: 0, deer: 0 }), total = tot.jaw + tot.deer, best = days.reduce((m: any, x: any) => (x.jaw + x.deer > (m ? m.jaw + m.deer : -1) ? x : m), null);
+  return c.json({ days: d, tz, total, jaw: tot.jaw, deer: tot.deer, avg_per_day: Math.round(total / d * 10) / 10, active_users: users.length, best_day: best && best.jaw + best.deer ? { label: best.label, n: best.jaw + best.deer } : null,
+    users: users.map((u: any) => ({ ...u, name: u.email.startsWith('partner+') ? 'Partner API' : `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email, email: u.email.startsWith('partner+') ? '' : u.email })), daily: days }); });
 A.get('/analytics', async c => { const d = Math.min(Math.max(+(c.req.query('days') || 30), 1), 365), w = 'at>now()-($1||\' days\')::interval';
   const one = async (t: string) => (await q(t, [String(d)]))[0];
   return c.json({ days: d, views: (await one(`select count(*)::int n from visits where ${w}`)).n, visitors: (await one(`select count(distinct visitor)::int n from visits where ${w}`)).n,
@@ -815,5 +818,6 @@ A.post('/biologists/:id/pay-all', async c => { const id = c.req.param('id'), row
 A.post('/consults/:id/reassign', async c => { const [o] = await q("select buck_id,biologist_id from consults where id=$1 and status in ('claimed','needs_info')", [c.req.param('id')]); if (!o) return c.json({ error: 'not_found' }, 404);
   await q("update consults set status='open',biologist_id=null,claimed_at=null where id=$1", [c.req.param('id')]); await q('delete from buck_shares where buck_id=$1 and to_user=$2', [o.buck_id, o.biologist_id]);
   await audit(c.get('user').id, 'consult_reassign', { id: c.req.param('id') }); return c.json({ ok: true }); });
+mountSeo({ app, A, q, getSetting, setSetting, audit, env, HTML });
 app.route('/api/admin', A);
 export default { port: +(env.PORT || 3000), fetch: app.fetch };
