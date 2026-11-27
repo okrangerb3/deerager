@@ -32,4 +32,11 @@ const T = await tok('bio@test.com', 'correct-horse-9'), H = await tok('admin@tes
   await p.click('#bform >> text=Jawbone teeth'); await p.click('text=Send report'); await p.waitForSelector('#okgo', { state: 'visible' }); await p.click('#okgo'); await p.waitForTimeout(1200); const r = (await db.query('select status,answer_age,answer_notes from consults where id=$1', [cid])).rows[0];
   ok('report sent from the form', r.status === 'answered' && r.answer_age === '4.5' && /Biologist age report/.test(r.answer_notes), r);
   await db.query('delete from bucks where id=$1', [bk]); }
+
+// admin manages a biologist
+{ const p = await (await b.newContext({ viewport: { width: 900, height: 900 } })).newPage(); p.on('pageerror', e => errs.push(e.message));
+  await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), H); await p.reload(); await p.waitForSelector('nav');
+  await p.evaluate(() => { S.tab = 'consults'; openAdmin(); }); await p.waitForSelector('text=Add biologist'); ok('admin Consults tab has biologist management', /Manage/.test(await p.textContent('#adm')));
+  await p.click('#adm tr.click >> nth=0'); await p.waitForSelector('text=Their consults'); const t = await p.textContent('#adm');
+  ok('biologist detail shows controls', /Suspend/.test(t) && /Remove biologist role/.test(t) && /Answered/.test(t)); }
 ok('no js errors', errs.length === 0); if (errs.length) console.log(errs); await b.close(); process.exit(fails ? 1 : 0);

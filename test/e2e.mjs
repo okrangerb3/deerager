@@ -143,6 +143,24 @@ r = await call('POST', '/admin/models/test', null, AD); ok('admin model connecti
   r = await call('POST', '/bio/connect', null, BIO); ok('connect fails cleanly when Stripe is unreachable', r.s === 502, r);
   r = await call('PUT', '/bio/profile', { title: 'State wildlife biologist' }, BIO); ok('biologist sets a title', r.s === 200, r);
   r = await call('GET', '/me', null, BIO); ok('biologist scans without a subscription', r.j.can_scan === true || r.j.stage === 'ready', r.j);
+  // -- admin manages biologists
+  r = await call('POST', '/admin/biologists', { email: 'newbio@test.com' }, AD); ok('new biologist needs a name', r.s === 400, r);
+  r = await call('POST', '/admin/biologists', { email: 'newbio@test.com', first_name: 'Dana', last_name: 'Wild', title: 'DNR biologist' }, AD); ok('admin invites a brand-new biologist', r.s === 200 && r.j.invite_link, r);
+  ok('invited biologist has the role and title', (await db.query("select role,bio_title from users where email='newbio@test.com'")).rows[0].role === 'biologist');
+  r = await call('POST', '/admin/biologists', { email: 'a@test.com' }, AD); ok('existing user can be promoted by email', r.s === 200 && r.j.existing, r); await call('POST', '/admin/biologists/' + aid + '/remove', null, AD);
+  ok('promoted user returns to hunter on remove', (await db.query('select role from users where id=$1', [aid])).rows[0].role === 'user');
+  const idX = await mk('age', 'x', 3000); await paid(idX); await call('POST', '/bio/consults/' + idX + '/claim', null, BIO);
+  r = await call('GET', '/admin/biologists/' + bioid, null, AD); ok('biologist detail shows totals and consults', r.s === 200 && r.j.totals.answered === 2 && r.j.totals.active === 1 && r.j.consults.length === 3 && r.j.bio_title === 'State wildlife biologist', r.j);
+  r = await call('POST', '/admin/consults/' + idX + '/reassign', null, AD); ok('admin sends a stuck consult back to the queue', r.s === 200 && (await db.query("select status,biologist_id from consults where id=$1", [idX])).rows[0].status === 'open', r);
+  ok('reassign removes the biologist share', (await db.query('select 1 from buck_shares where buck_id=$1 and to_user=$2', [cb, bioid])).rowCount === 0);
+  await call('POST', '/bio/consults/' + idX + '/claim', null, BIO);
+  r = await call('POST', '/admin/biologists/' + bioid + '/status', { active: false }, AD); ok('admin suspends a biologist', r.s === 200 && r.j.released === 1, r);
+  r = await call('GET', '/bio/queue', null, BIO); ok('suspended biologist is locked out', r.s === 403, r);
+  ok('their active consult went back to the queue', (await db.query("select status from consults where id=$1", [idX])).rows[0].status === 'open');
+  r = await call('POST', '/admin/biologists/' + bioid + '/status', { active: true }, AD); r = await call('GET', '/bio/queue', null, BIO); ok('reactivated biologist is back', r.s === 200, r);
+  r = await call('POST', '/admin/biologists/' + bioid + '/pay-all', null, AD); ok('pay all owed', r.s === 200 && r.j.paid === 1, r);
+  r = await call('GET', '/bio/earnings', null, BIO); ok('nothing owed afterwards', r.j.owed === 0 && r.j.paid === 3150, r.j);
+  r = await call('PUT', '/admin/biologists/' + bioid + '/title', { title: 'Lead biologist' }, AD); ok('admin edits title', r.s === 200, r);
   await db.query('delete from bucks where id=$1', [cb]); // keep later tests' buck ordering intact
 }
 // ---- named deer + deer photos on jaw scans
