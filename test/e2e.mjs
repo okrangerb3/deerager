@@ -373,6 +373,11 @@ r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all start
   r = await call('PUT', '/admin/regions/test_region', { name: 'Test', zip_prefixes: '123', shift: 0.25 }, AD); ok('admin adds a region', r.s === 200, r); r = await call('DELETE', '/admin/regions/test_region', null, AD); ok('and deletes it', r.s === 200, r);
   await call('PUT', '/admin/regions/east_tx_pineywoods', { name: 'East Texas Pineywoods', zip_prefixes: '755,756,757,758,759,773', shift: 2 }, AD); await call('POST', '/admin/recalc', null, AD);
   r = await call('PUT', '/admin/regions/pin_zip', { name: 'Pin ZIP', zip_prefixes: '75701', shift: 0.25 }, AD); const sp = await one(TX); const op = await ob(sp); ok('a 5-digit ZIP beats the wider prefix', op.region && op.region.id === 'pin_zip' && op.region.shift === 0.25, op.region); await call('DELETE', '/admin/regions/pin_zip', null, AD); }
+// ---- photo type is detected, not asked
+{ r = await call('POST', '/bucks', { name: 'Auto Kind' }, AD); const bid = r.j.id; let f = new FormData(); f.append('kind', 'auto'); f.append('photo', jpg(), 'a.jpg'); r = await call('POST', '/bucks/' + bid + '/photos', f, AD);
+  ok('photo type detected when not given', r.s === 200 && r.j.kinds && r.j.kinds[0] === 'jawbone', r.j);
+  f = new FormData(); f.append('kind', 'rack'); f.append('photo', jpg(), 'b.jpg'); r = await call('POST', '/bucks/' + bid + '/photos', f, AD); ok('an explicit type is still honored', r.j.kinds[0] === 'rack', r.j);
+  const kk = (await db.query('select kind from buck_photos where buck_id=$1 order by created_at', [bid])).rows.map(x => x.kind); ok('stored kinds match', kk.join() === 'jawbone,rack', kk); await db.query('delete from bucks where id=$1', [bid]); }
 // ---- SEO
 { const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
   let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));
