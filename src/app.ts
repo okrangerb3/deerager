@@ -37,7 +37,7 @@ const cols = ['first_name text', 'last_name text', 'address text', 'city text', 
 for (const c of cols) await db.query(`alter table users add column if not exists ${c}`);
 await db.query('alter table scans add column if not exists buck_id uuid references bucks(id) on delete set null');
 await db.query('alter table model_runs add column if not exists confidence int');
-await db.query('alter table bucks add column if not exists points int'); await db.query('alter table bucks add column if not exists kill_zip text'); await db.query('alter table bucks add column if not exists share_token text'); await db.query('alter table plans add column if not exists created_at timestamptz default now()');
+await db.query('alter table bucks add column if not exists points int'); await db.query('alter table bucks add column if not exists kill_zip text'); await db.query('alter table bucks add column if not exists known_score numeric'); await db.query('alter table bucks add column if not exists share_token text'); await db.query('alter table plans add column if not exists created_at timestamptz default now()');
 await db.query("create table if not exists partners(id uuid primary key default gen_random_uuid(),name text not null,key_hash text unique not null,key_prefix text,user_id uuid,webhook_url text,webhook_secret text,monthly_limit int default 500,active bool default true,created_at timestamptz default now())");
 await db.query("create table if not exists capture_links(token text primary key,partner_id uuid references partners(id) on delete cascade,mode text,ext jsonb,return_url text,expires_at timestamptz,used int default 0,max_uses int default 3,created_at timestamptz default now())");
 await db.query("create table if not exists consults(id uuid primary key default gen_random_uuid(),buck_id uuid references bucks(id) on delete cascade,hunter_id uuid references users(id) on delete cascade,biologist_id uuid references users(id),status text default 'pending_payment',question text,price_cents int,payout_pct int,payout_cents int,checkout_session text,payment_intent text,charge_id text,answer_age text,answer_conf text,answer_notes text,need_info text,hunter_reply text,payout_status text default 'unpaid',transfer_id text,payout_paid_at timestamptz,created_at timestamptz default now(),paid_at timestamptz,claimed_at timestamptz,answered_at timestamptz,refunded_at timestamptz)");
@@ -140,7 +140,20 @@ const PRIOR: any = { '0.5': 0.02, '1.5': 0.18, '2.5': 0.22, '3.5': 0.22, '4.5': 
 const FIXED: any = { Fawn: { '0.5': 1 }, Yearling: { '1.5': 0.88, '2.5': 0.12 }, '2.5': { '1.5': 0.04, '2.5': 0.5, '3.5': 0.32, '4.5': 0.14 } }; // light wear is often misjudged on older deer, so a grade-1 call keeps real weight on 3.5+
 // Shift a distribution toward older classes (regional wear curve). s is in age classes, so 0.5 moves half the weight up one class. Fawn and yearling calls come from tooth replacement, which does not vary by region, so they are never shifted.
 const shiftDist = (m: any, sh: number) => { const up = (x: any) => { const r: any = {}; for (const a of AGES) r[a] = 0; AGES.forEach((a, i) => { r[AGES[Math.min(i + 1, AGES.length - 1)]] += x[a] || 0; }); return r; }; let cur: any = { ...m }; for (const a of AGES) cur[a] = cur[a] || 0; const whole = Math.floor(sh), f = sh - whole; for (let i = 0; i < whole; i++) cur = up(cur); if (f > 0) { const u1 = up(cur), r: any = {}; for (const a of AGES) r[a] = (1 - f) * cur[a] + f * u1[a]; cur = r; } return cur; };
-const ageDist = (o: any, mode: string, cls: string | null, cf: number, shift = 0) => {
+// Antler size is only supporting evidence: a known Boone & Crockett net score gently shifts the odds toward the ages that usually carry that much antler. It never decides the age.
+const ANTLER_L: [number, any][] = [[90, { '0.5': 1, '1.5': 1.6, '2.5': 1.5, '3.5': 0.9, '4.5': 0.5, '5.5': 0.35, '6.5+': 0.3 }], [110, { '1.5': 1.4, '2.5': 1.5, '3.5': 1.1, '4.5': 0.7, '5.5': 0.5, '6.5+': 0.4 }], [130, { '1.5': 0.6, '2.5': 1, '3.5': 1.3, '4.5': 1.2, '5.5': 0.9, '6.5+': 0.8 }], [150, { '1.5': 0.3, '2.5': 0.6, '3.5': 1.1, '4.5': 1.5, '5.5': 1.4, '6.5+': 1.2 }], [1e9, { '1.5': 0.15, '2.5': 0.3, '3.5': 0.8, '4.5': 1.4, '5.5': 1.6, '6.5+': 1.5 }]];
+const ANTLER_W = 0.5;
+function applyAntler(d: any, score: number | null) {
+  if (!d || !(score > 0) || d.probs['0.5'] >= 99) return d;
+  const L = ANTLER_L.find(x => score < x[0])![1], probs: any = {}; let tot = 0;
+  for (const a of AGES) { probs[a] = (d.probs[a] || 0) * (1 + ANTLER_W * ((L[a] ?? 1) - 1)); tot += probs[a]; }
+  for (const a of AGES) probs[a] = Math.round((probs[a] / tot) * 1000) / 10;
+  const best = AGES.reduce((x, y) => (probs[y] > probs[x] ? y : x)); let cum = 0, lo = AGES[0], hi = AGES[AGES.length - 1], gotLo = false;
+  for (const a of AGES) { cum += probs[a]; if (!gotLo && cum >= 10) { lo = a; gotLo = true; } if (cum >= 90) { hi = a; break; } }
+  return { ...d, probs, best, lo, hi, antler: { score, before: d.best } };
+}
+const antlerFor = (b: any): number | null => { const k = +b?.known_score, n = +(b?.bc?.net ?? b?.bc_net); return k > 0 ? k : n > 0 ? n : null; };
+const ageDist = (o: any, mode: string, cls: string | null, cf: number, shift = 0, antler: number | null = null) => {
   if (!o || o.usable === false || mode === 'bc') return null;
   let m: any = FIXED[cls as string] || null;
   if (!m && o.age_probs && typeof o.age_probs === 'object') { m = {}; let t = 0; for (const a of AGES) { m[a] = Math.max(0, +o.age_probs[a] || 0); t += m[a]; } if (t > 0) for (const a of AGES) m[a] /= t; else m = null; }
@@ -153,7 +166,7 @@ const ageDist = (o: any, mode: string, cls: string | null, cf: number, shift = 0
     for (const a of AGES) { cum += probs[a]; if (!gotLo && cum >= 10) { lo = a; gotLo = true; } if (cum >= 90) { hi = a; break; } }
     return { probs, best, lo, hi, method: mode }; };
   const raw = mk(m), sh = shift > 0 && cls !== 'Fawn' && cls !== 'Yearling' && mode === 'jaw' ? shift : 0;
-  return sh ? { ...mk(shiftDist(m, sh)), raw_best: raw.best, shift: sh } : { ...raw, raw_best: raw.best, shift: 0 };
+  return applyAntler(sh ? { ...mk(shiftDist(m, sh)), raw_best: raw.best, shift: sh } : { ...raw, raw_best: raw.best, shift: 0 }, antler);
 };
 
 const regionFor = async (u: any) => { const z = String(u?.zip || '').replace(/\D/g, ''); if (z.length < 3) return null; const [r] = await q('select r.id,r.name,r.shift::float shift from regions r where exists (select 1 from unnest(r.zip_prefixes) p where $1 like p || \'%\') order by (select max(length(p)) from unnest(r.zip_prefixes) p where $1 like p || \'%\') desc limit 1', [String(u.zip).replace(/\D/g, '').slice(0, 5)]); return r || null; };
@@ -249,8 +262,8 @@ app.put('/api/prefs', auth, async c => { const b = await c.req.json(); const ext
   await q('update users set prefs=$1 where id=$2', [{ results_email: !!b.results_email, billing: b.billing !== false, extra_emails: extra, min_age, profiles, active_profile }, c.get('user').id]); return c.json({ ok: true, extra_emails: extra, profiles, active_profile }); });
 
 // ---------- bucks (private to owner; admin reads via /api/admin)
-const BUCK = ['name', 'hunted_on', 'location', 'stand', 'wind_dir', 'temp_f', 'rut_phase', 'tactics', 'notes', 'bc', 'points', 'property_kind', 'property_name', 'status', 'kill_zip'];
-const buckVals = (b: any) => [String(b.name || '').trim().slice(0, 80), b.hunted_on || null, b.location || null, b.stand || null, b.wind_dir || null, b.temp_f === '' || b.temp_f == null ? null : Math.round(+b.temp_f), b.rut_phase || null, JSON.stringify((b.tactics || []).slice(0, 20).map((x: any) => String(x).slice(0, 40))), String(b.notes || '').slice(0, 4000), b.bc ? JSON.stringify(b.bc) : null, b.points === '' || b.points == null ? null : Math.max(0, Math.min(40, Math.round(+b.points) || 0)), ['public', 'club', 'private'].includes(b.property_kind) ? b.property_kind : null, String(b.property_name || '').slice(0, 80) || null, ['watching', 'passed', 'harvested'].includes(b.status) ? b.status : 'watching', String(b.kill_zip || '').replace(/\D/g, '').slice(0, 5) || null];
+const BUCK = ['name', 'hunted_on', 'location', 'stand', 'wind_dir', 'temp_f', 'rut_phase', 'tactics', 'notes', 'bc', 'points', 'property_kind', 'property_name', 'status', 'kill_zip', 'known_score'];
+const buckVals = (b: any) => [String(b.name || '').trim().slice(0, 80), b.hunted_on || null, b.location || null, b.stand || null, b.wind_dir || null, b.temp_f === '' || b.temp_f == null ? null : Math.round(+b.temp_f), b.rut_phase || null, JSON.stringify((b.tactics || []).slice(0, 20).map((x: any) => String(x).slice(0, 40))), String(b.notes || '').slice(0, 4000), b.bc ? JSON.stringify(b.bc) : null, b.points === '' || b.points == null ? null : Math.max(0, Math.min(40, Math.round(+b.points) || 0)), ['public', 'club', 'private'].includes(b.property_kind) ? b.property_kind : null, String(b.property_name || '').slice(0, 80) || null, ['watching', 'passed', 'harvested'].includes(b.status) ? b.status : 'watching', String(b.kill_zip || '').replace(/\D/g, '').slice(0, 5) || null, b.known_score === '' || b.known_score == null || !(+b.known_score > 0) ? null : Math.min(300, Math.round(+b.known_score * 8) / 8)];
 app.get('/api/bucks', auth, gate, async c => c.json(await q("select b.*,(select count(*)::int from scans s where s.buck_id=b.id) scans,(select class from scans s where s.buck_id=b.id and s.mode='jaw' order by created_at desc limit 1) age_class,(select count(*)::int from buck_photos p where p.buck_id=b.id)+(select count(*)::int from photos p join scans s on s.id=p.scan_id where s.buck_id=b.id) photo_count from bucks b where user_id=$1 order by coalesce(hunted_on,created_at::date) desc,created_at desc", [c.get('user').id])));
 app.post('/api/bucks', auth, async c => { const v = buckVals(await c.req.json()); if (!v[0]) return c.json({ error: 'name_required' }, 400);
   const [b] = await q(`insert into bucks(user_id,${BUCK.join(',')}) values(${['$1', ...BUCK.map((_, i) => '$' + (i + 2))].join(',')}) returning *`, [c.get('user').id, ...v]); return c.json(b); });
@@ -384,27 +397,27 @@ async function autoRetry(id: string, n: number) {
   s.flags = { ...s.flags, auto_retries: n }; const r: any = await runAnalysis(s, u, imgs); if (!r.error && r.scan?.class && u.prefs?.results_email) emailScan(r.scan, [u.email, ...(u.prefs.extra_emails || [])], u).catch(() => {});
 }
 // Re-scores stored jaw results with the current regional curve, without calling any AI, so every saved report matches the settings.
-function rescoreJaw(o: any, rg: any) {
+function rescoreJaw(o: any, rg: any, antler: number | null = null) {
   const k: any = classify(o); if (!k.cls) return null; o.rule = k.rule || null; o.conf_detail = confDetail(o, 'jaw'); delete o.region; delete o.rut;
-  const d = ageDist(o, 'jaw', k.cls, conf(o, 'jaw'), rg?.shift || 0); if (!d) return { k, o };
+  const d = ageDist(o, 'jaw', k.cls, conf(o, 'jaw'), rg?.shift || 0, antler); if (!d) return { k, o };
   if (rg && d.shift) { o.region = { id: rg.id, name: rg.name, shift: rg.shift }; if (rg.rut) o.rut = rg.rut; } o.dist = d;
-  if (k.cls === 'Middle' || k.cls === 'Old' || d.shift) k.range = `Most likely ${d.best} years (likely ${d.lo} to ${d.hi})`; return { k, o };
+  if (k.cls === 'Middle' || k.cls === 'Old' || d.shift || d.antler) k.range = `Most likely ${d.best} years (likely ${d.lo} to ${d.hi})`; return { k, o };
 }
 let RECALC: Promise<any> | null = null;
 function recalcAll(buckId?: string) { if (buckId) return doRecalc(buckId); if (!RECALC) RECALC = doRecalc().finally(() => { RECALC = null; }); return RECALC; }
 async function doRecalc(buckId?: string) { return await (async () => { let scans = 0, runs = 0; const cache = new Map<string, any>();
-    const rows = await q("select s.id,s.observations,u.zip,b.kill_zip,b.rut_phase from scans s join users u on u.id=s.user_id left join bucks b on b.id=s.buck_id where s.mode='jaw' and s.observations is not null and s.class is not null" + (buckId ? ' and s.buck_id=$1' : ''), buckId ? [buckId] : []);
+    const rows = await q("select s.id,s.observations,u.zip,b.kill_zip,b.rut_phase,b.known_score,b.bc from scans s join users u on u.id=s.user_id left join bucks b on b.id=s.buck_id where s.mode='jaw' and s.observations is not null and s.class is not null" + (buckId ? ' and s.buck_id=$1' : ''), buckId ? [buckId] : []);
     for (const r of rows as any[]) { const z = [r.kill_zip || r.zip || '', r.rut_phase || ''].join('|'); if (!cache.has(z)) cache.set(z, await curveFor({ zip: r.zip }, { kill_zip: r.kill_zip, rut_phase: r.rut_phase })); const rg = cache.get(z);
-      const x = rescoreJaw(r.observations, rg); if (!x) continue; await q('update scans set observations=$1,range=$2 where id=$3', [x.o, x.k.range, r.id]); scans++;
-      for (const m of await q('select id,result from model_runs where scan_id=$1 and truth_class is null and result is not null', [r.id]) as any[]) { if (rescoreJaw(m.result, rg)) { await q('update model_runs set result=$1 where id=$2', [m.result, m.id]); runs++; } } }
+      const ant = antlerFor(r), x = rescoreJaw(r.observations, rg, ant); if (!x) continue; await q('update scans set observations=$1,range=$2 where id=$3', [x.o, x.k.range, r.id]); scans++;
+      for (const m of await q('select id,result from model_runs where scan_id=$1 and truth_class is null and result is not null', [r.id]) as any[]) { if (rescoreJaw(m.result, rg, ant)) { await q('update model_runs set result=$1 where id=$2', [m.result, m.id]); runs++; } } }
     return { scans, runs }; })(); }
 async function runAnalysis(s: any, u: any, imgs: any[]) {
   const mode = s.mode, all = configured(); if (!all.length) return { error: 'analysis_unavailable' };
-  const rg = mode === 'jaw' ? await curveFor(u, s.buck_id ? (await q('select kill_zip,rut_phase from bucks where id=$1', [s.buck_id]))[0] : null) : null, avail = live(all), pick = (await getSetting('compare_all')) === 'false' ? [avail.includes(env.PRIMARY_MODEL!) ? env.PRIMARY_MODEL! : avail[0]] : avail;
+  const bk: any = s.buck_id ? (await q('select kill_zip,rut_phase,known_score,bc from bucks where id=$1', [s.buck_id]))[0] : null, antler = antlerFor(bk), rg = mode === 'jaw' ? await curveFor(u, bk) : null, avail = live(all), pick = (await getSetting('compare_all')) === 'false' ? [avail.includes(env.PRIMARY_MODEL!) ? env.PRIMARY_MODEL! : avail[0]] : avail;
   const runs = await Promise.all(pick.map(p => runModel(p, imgs, mode)));
   for (const r of runs as any[]) { if (r.error && fatalErr(r.error)) BREAKER[r.provider] = { until: Date.now() + 15 * 60e3, reason: String(r.error).replace(/\s+/g, ' ').slice(0, 200), since: BREAKER[r.provider]?.since || new Date().toISOString() }; else if (r.result) delete BREAKER[r.provider]; }
-  const scored = runs.map((r: any) => { const o = r.result, k: any = !o ? { cls: null, range: null } : mode === 'bc' ? { cls: o.usable !== false && o.net_low != null ? `Net ${o.net_low}-${o.net_high} in (est.)` : null, range: 'Estimate only. Not an official score.' } : classify(o); if (o) { o.rule = k.rule || null; o.conf_detail = confDetail(o, mode); const d = mode === 'bc' ? null : ageDist(o, mode, k.cls, conf(o, mode), rg?.shift || 0); if (d && rg && d.shift) { o.region = { id: rg.id, name: rg.name, shift: rg.shift }; if (rg.rut) o.rut = rg.rut; }
-      if (d) { o.dist = d; if (!k.cls && mode === 'deer') k.cls = d.best; if (mode === 'deer' || k.cls === 'Middle' || k.cls === 'Old' || d.shift) k.range = `Most likely ${d.best} years (likely ${d.lo} to ${d.hi})`; } } return { ...r, ...k, conf: o ? conf(o, mode) : null }; });
+  const scored = runs.map((r: any) => { const o = r.result, k: any = !o ? { cls: null, range: null } : mode === 'bc' ? { cls: o.usable !== false && o.net_low != null ? `Net ${o.net_low}-${o.net_high} in (est.)` : null, range: 'Estimate only. Not an official score.' } : classify(o); if (o) { o.rule = k.rule || null; o.conf_detail = confDetail(o, mode); const d = mode === 'bc' ? null : ageDist(o, mode, k.cls, conf(o, mode), rg?.shift || 0, antler); if (d && rg && d.shift) { o.region = { id: rg.id, name: rg.name, shift: rg.shift }; if (rg.rut) o.rut = rg.rut; }
+      if (d) { o.dist = d; if (!k.cls && mode === 'deer') k.cls = d.best; if (mode === 'deer' || k.cls === 'Middle' || k.cls === 'Old' || d.shift || d.antler) k.range = `Most likely ${d.best} years (likely ${d.lo} to ${d.hi})`; } } return { ...r, ...k, conf: o ? conf(o, mode) : null }; });
   await q('delete from model_runs where scan_id=$1 and truth_class is null', [s.id]);
   const pr = await prices(); for (const r of scored as any[]) await q('insert into model_runs(scan_id,provider,model,result,class,confidence,latency_ms,error,in_tokens,out_tokens,cost_usd) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', [s.id, r.provider, r.model, r.result || null, r.cls, r.conf, r.ms, r.error || null, r.inTok || null, r.outTok || null, runCost(pr, r.model, r.inTok || 0, r.outTok || 0)]);
   const good = scored.filter(r => r.cls).sort((a, b) => b.conf - a.conf), best = good[0] || scored.find(r => r.result);

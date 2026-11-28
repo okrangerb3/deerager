@@ -94,3 +94,6 @@ Photos added to a deer are identified by the model (jawbone, deer, rack, mount) 
 
 ### Kill location and rut phase
 Each deer has an optional "ZIP where he was killed"; its region sets the wear curve (else the hunter's own ZIP). The deer's rut phase can add a small age-class nudge, set per phase in Admin > Calibration (all 0 by default). Saving a deer or the offsets re-scores that deer's / all saved reports. East Texas Pineywoods is now seeded at 3 (shifts go 0 to 4).
+
+### Antler score as evidence
+If a deer has a known Boone & Crockett net score (the optional "Known score" field, else the net from the B&C score sheet), it gently shifts the age odds toward ages that usually carry that much antler (weight 0.5, never decisive). The report says so. Without a score nothing changes, and adding one re-scores that deer's reports.

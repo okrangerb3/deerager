@@ -391,6 +391,13 @@ r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all start
   r = await call('POST', '/bucks', { name: 'Kill Zip', kill_zip: '75701-1234', rut_phase: 'Post-rut' }, AD); const kb = r.j.id; ok('buck saves kill ZIP (digits only, 5 max)', r.j.kill_zip === '75701', r.j.kill_zip);
   let f = scanForm('jaw', kb); r = await call('POST', '/scans', f, AD); const ko = r.j.observations || {}; ok('kill-ZIP region and rut phase shape the age', r.s === 200 && ko.region && ko.region.shift === 3.5 && ko.rut && ko.rut.phase === 'Post-rut' && ko.dist.shift === 3.5, [r.s, ko.region, ko.rut]);
   await call('PUT', '/admin/calibration/settings', { rut_shifts: {} }, AD); await db.query('delete from bucks where id=$1', [kb]); await db.query('delete from scans where id=$1', [r.j.id]); }
+// ---- antler score as supporting evidence
+{ r = await call('POST', '/bucks', { name: 'No Score' }, AD); const b0 = r.j.id; r = await call('POST', '/bucks', { name: 'Big Rack', known_score: '162.5' }, AD); const b1 = r.j.id; ok('known score saves, optional', r.j.known_score == 162.5, r.j.known_score);
+  const r0 = await call('POST', '/scans', scanForm('jaw', b0), AD), r1 = await call('POST', '/scans', scanForm('jaw', b1), AD), d0 = r0.j.observations.dist, d1 = r1.j.observations.dist;
+  ok('no score: nothing added, still ages the deer', r0.s === 200 && !d0.antler && d0.best, d0);
+  ok('score considered as supporting evidence', r1.s === 200 && d1.antler && d1.antler.score === 162.5 && (d1.probs['4.5'] + d1.probs['5.5'] + d1.probs['6.5+']) > (d0.probs['4.5'] + d0.probs['5.5'] + d0.probs['6.5+']), [d0.probs, d1.probs]);
+  await call('PUT', '/bucks/' + b0, { name: 'No Score', known_score: '70' }, AD); await call('POST', '/admin/recalc', null, AD); const o2 = (await db.query('select observations from scans where id=$1', [r0.j.id])).rows[0].observations; ok('adding a score later updates that deer\'s reports', o2.dist.antler && o2.dist.antler.score === 70, o2.dist.antler);
+  for (const id of [b0, b1]) await db.query('delete from bucks where id=$1', [id]); }
 // ---- SEO
 { const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
   let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));
