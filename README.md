@@ -91,3 +91,6 @@ Tooth wear varies with soil, grit and diet, and southeastern deer tend to look y
 
 ### Photo identification
 Photos added to a deer are identified by the model (jawbone, deer, rack, mount) and, for jaws, the view (side, top, angled, close-up) and which half (left or right). `POST /api/photos/identify` does the same for photos picked in a scan. The jaw set needs a left side, a right side and a top-down view (a molar close-up helps); anything missing is flagged before analyzing and on the deer page (`jaw_check`). A photo labeled left that is really the right side is relabeled before the analysis.
+
+### Kill location and rut phase
+Each deer has an optional "ZIP where he was killed"; its region sets the wear curve (else the hunter's own ZIP). The deer's rut phase can add a small age-class nudge, set per phase in Admin > Calibration (all 0 by default). Saving a deer or the offsets re-scores that deer's / all saved reports. East Texas Pineywoods is now seeded at 3 (shifts go 0 to 4).

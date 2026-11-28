@@ -71,5 +71,5 @@ const T = await tok('bio@test.com', 'correct-horse-9'), H = await tok('admin@tes
 { const p = await (await b.newContext({ viewport: { width: 900, height: 900 } })).newPage(); p.on('pageerror', e => errs.push(e.message));
   await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), H); await p.reload(); await p.waitForSelector('nav');
   await p.evaluate(() => { S.tab = 'calibration'; openAdmin(); }); await p.waitForSelector('text=Why this exists'); const t = await p.textContent('#adm');
-  ok('calibration tab shows the East Texas region and shift', /East Texas Pineywoods/.test(t) && /Shift 2/.test(t) && /Add a region/.test(t)); }
+  ok('calibration tab shows the East Texas region and shift', /East Texas Pineywoods/.test(t) && /Shift 3/.test(t) && /Add a region/.test(t)); }
 ok('no js errors', errs.length === 0); if (errs.length) console.log(errs); await b.close(); process.exit(fails ? 1 : 0);
