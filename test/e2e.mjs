@@ -398,6 +398,13 @@ r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all start
   ok('score considered as supporting evidence', r1.s === 200 && d1.antler && d1.antler.score === 162.5 && (d1.probs['4.5'] + d1.probs['5.5'] + d1.probs['6.5+']) > (d0.probs['4.5'] + d0.probs['5.5'] + d0.probs['6.5+']), [d0.probs, d1.probs]);
   await call('PUT', '/bucks/' + b0, { name: 'No Score', known_score: '70' }, AD); await call('POST', '/admin/recalc', null, AD); const o2 = (await db.query('select observations from scans where id=$1', [r0.j.id])).rows[0].observations; ok('adding a score later updates that deer\'s reports', o2.dist.antler && o2.dist.antler.score === 70, o2.dist.antler);
   for (const id of [b0, b1]) await db.query('delete from bucks where id=$1', [id]); }
+// ---- read a filled-out score sheet photo
+{ r = await call('POST', '/bucks', { name: 'Sheet Buck' }, AD); const sb = r.j.id; let f = new FormData(); f.append('photos', jpg(), 's.jpg'); f.append('buck_id', sb); r = await call('POST', '/bc/read-sheet', f, AD);
+  ok('score sheet photo is read into numbers', r.s === 200 && r.j.r.length === 12 && r.j.l[0] === 23.5 && r.j.sheet_net === 146.5 && r.j.spread === 17 && r.j.hunter === 'Test Hunter', r.j);
+  r = await call('GET', '/bucks/' + sb, null, AD); ok('and saved on the deer with its known score', r.j.bc && r.j.bc.from_sheet && +r.j.known_score === 146.5 && r.j.bc.l[0] === 23.5, [r.j.bc, r.j.known_score]);
+  r = await call('GET', `/bucks/${sb}/sheet`, null, AD); ok('score sheet view has the numbers', r.s === 200 && r.j.bc && r.j.bc.r[0] === 24, r.j.bc);
+  f = new FormData(); f.append('photos', jpg(), 's.jpg'); r = await call('POST', '/bc/read-sheet', f, AD); ok('works without a deer (fills the calculator)', r.s === 200 && r.j.net === 146.5, r.j);
+  await db.query('delete from bucks where id=$1', [sb]); }
 // ---- SEO
 { const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
   let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));
