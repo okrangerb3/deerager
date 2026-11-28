@@ -9,4 +9,9 @@ await p.fill('#bkz', '75785'); await p.press('#bkz', 'Tab'); await p.selectOptio
 const s = await (await fetch(BASE + '/api/bucks/' + id, { headers: H(T) })).json();
 ok('kill ZIP and known age save without pressing Save', s.kill_zip === '75785' && s.known_age === '4.5', s);
 ok('known age shown on his page', (await p.textContent('#app')).includes('Known age (from you):'));
+const jpg = new Blob([new Uint8Array([255,216,255,224,0,16,74,70,73,70,0,1,1,0,0,1,0,1,0,0,255,217])], { type: 'image/jpeg' }); const fd = new FormData(); fd.append('mode', 'jaw'); fd.append('buck_id', id); for (let i = 0; i < 2; i++) fd.append('photos', jpg, 'a.jpg');
+const sc = await (await fetch(BASE + '/api/scans', { method: 'POST', headers: { authorization: 'Bearer ' + T }, body: fd })).json();
+await p.evaluate(async i => { S.scan = await api('/scans/' + i); S.bucks = await api('/bucks'); go('report') }, sc.id); await p.waitForSelector('#rba', { timeout: 8000 });
+ok('report has a believed-age spot', (await p.textContent('#app')).includes('Age you believe he is')); await p.selectOption('#rba', '5.5'); await p.click('text=Save >> nth=0'); await p.waitForTimeout(1500);
+const s2 = await (await fetch(BASE + '/api/bucks/' + id, { headers: H(T) })).json(); ok('saving it from the report sets his known age', s2.known_age === '5.5', s2.known_age);
 ok('no js errors', errs.length === 0, errs); await fetch(BASE + '/api/bucks/' + id, { method: 'DELETE', headers: H(T) }); await b.close(); process.exit(fails ? 1 : 0);
