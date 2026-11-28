@@ -1,0 +1,11 @@
+import { createRequire } from 'module'; const { chromium } = createRequire(import.meta.url)(process.env.PW || 'playwright');
+const BASE = process.env.BASE || 'http://localhost:3000'; let fails = 0; const ok = (n, c, d) => { console.log((c ? 'PASS ' : 'FAIL ') + n, c ? '' : JSON.stringify(d)); if (!c) fails++; };
+const T = (await (await fetch(BASE + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'admin@test.com', password: 'adminpass12' }) })).json()).token;
+const b = await chromium.launch(), p = await (await b.newContext({ viewport: { width: 420, height: 900 } })).newPage(), errs = []; p.on('pageerror', e => errs.push(e.message));
+await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), T); await p.reload(); await p.waitForSelector('nav'); await p.evaluate(() => go('bc')); await p.waitForSelector('#l0');
+ok('parser handles fractions', await p.evaluate(() => [pf('5 3/8'), pf('5-3/8'), pf('3/8'), pf('5⅜'), pf('5.375'), pf('24'), pf('')].join()) === '5.375,5.375,0.375,5.375,5.375,24,0');
+ok('formatter writes eighths', await p.evaluate(() => [ff(5.375), ff(0.5), ff(24), ff(17.25), ff(0)].join('|')) === '5 3/8|1/2|24|17 1/4|');
+await p.fill('#l0', '24 4/8'); await p.fill('#r0', '23 6/8'); await p.fill('#l1', '8 2/8'); await p.fill('#r1', '8'); await p.fill('#sp', '17 1/8'); await p.press('#sp', 'Tab');
+ok('field normalizes on blur', (await p.inputValue('#sp')) === '17 1/8' && (await p.inputValue('#l0')) === '24 1/2', await p.inputValue('#l0'));
+ok('gross uses the fractions', await p.evaluate(() => { const b = bcv(); return b.l[0] === 24.5 && b.r[0] === 23.75 && b.spread === 17.125 }));
+ok('no js errors', errs.length === 0, errs); await b.close(); process.exit(fails ? 1 : 0);
