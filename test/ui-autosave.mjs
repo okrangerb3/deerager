@@ -5,6 +5,7 @@ const T = (await (await fetch(BASE + '/api/login', { method: 'POST', headers: { 
 const id = (await (await fetch(BASE + '/api/bucks', { method: 'POST', headers: H(T), body: JSON.stringify({ name: 'Auto Save' }) })).json()).id;
 const b = await chromium.launch(), p = await (await b.newContext({ viewport: { width: 420, height: 900 } })).newPage(), errs = []; p.on('pageerror', e => errs.push(e.message));
 await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), T); await p.reload(); await p.waitForSelector('nav'); await p.evaluate(i => openBuck(i), id); await p.waitForSelector('#bkz');
+await p.fill('#bpn', 'Pine Ridge Club'); await p.press('#bpn', 'Tab'); await p.waitForTimeout(1200); const sc0 = await (await fetch(BASE + '/api/bucks/' + id, { headers: H(T) })).json(); ok('club name saves without pressing Save', sc0.property_name === 'Pine Ridge Club', sc0.property_name);
 await p.fill('#bkz', '75785'); await p.press('#bkz', 'Tab'); await p.selectOption('#bka', '4.5'); await p.waitForTimeout(1800);
 const s = await (await fetch(BASE + '/api/bucks/' + id, { headers: H(T) })).json();
 ok('kill ZIP and known age save without pressing Save', s.kill_zip === '75785' && s.known_age === '4.5', s);
