@@ -1,0 +1,12 @@
+import { createRequire } from 'module'; const { chromium } = createRequire(import.meta.url)(process.env.PW || 'playwright');
+const BASE = process.env.BASE || 'http://localhost:3000'; let fails = 0; const ok = (n, c, d) => { console.log((c ? 'PASS ' : 'FAIL ') + n, c ? '' : JSON.stringify(d)); if (!c) fails++; };
+const H = t => ({ authorization: 'Bearer ' + t, 'content-type': 'application/json' });
+const T = (await (await fetch(BASE + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'admin@test.com', password: 'adminpass12' }) })).json()).token;
+const id = (await (await fetch(BASE + '/api/bucks', { method: 'POST', headers: H(T), body: JSON.stringify({ name: 'Auto Save' }) })).json()).id;
+const b = await chromium.launch(), p = await (await b.newContext({ viewport: { width: 420, height: 900 } })).newPage(), errs = []; p.on('pageerror', e => errs.push(e.message));
+await p.goto(BASE); await p.evaluate(t => localStorage.setItem('t', t), T); await p.reload(); await p.waitForSelector('nav'); await p.evaluate(i => openBuck(i), id); await p.waitForSelector('#bkz');
+await p.fill('#bkz', '75785'); await p.press('#bkz', 'Tab'); await p.selectOption('#bka', '4.5'); await p.waitForTimeout(1800);
+const s = await (await fetch(BASE + '/api/bucks/' + id, { headers: H(T) })).json();
+ok('kill ZIP and known age save without pressing Save', s.kill_zip === '75785' && s.known_age === '4.5', s);
+ok('known age shown on his page', (await p.textContent('#app')).includes('Known age (from you):'));
+ok('no js errors', errs.length === 0, errs); await fetch(BASE + '/api/bucks/' + id, { method: 'DELETE', headers: H(T) }); await b.close(); process.exit(fails ? 1 : 0);

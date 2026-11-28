@@ -413,6 +413,13 @@ r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all start
   r = await call('GET', '/bucks/' + sp, null, AD); ok('new deer has no score', !r.j.bc, r.j.bc);
   await db.query("insert into buck_photos(buck_id,s3_key,kind) values($1,'x/sheet.jpg','sheet'),($1,'x/rack.jpg','rack'),($1,'x/jaw.jpg','jawbone')", [sp]);
   const kinds = (await db.query("select kind from buck_photos where buck_id=$1 and kind not in ('field','sheet','rack','mount')", [sp])).rows.map(x => x.kind); ok('only jaw-type photos feed the jaw analysis', kinds.join() === 'jawbone', kinds); await db.query('delete from bucks where id=$1', [sp]); }
+// ---- known age
+{ r = await call('POST', '/bucks', { name: 'Known Age' }, AD); const ka = r.j.id; r = await call('POST', '/scans', scanForm('jaw', ka), AD); const sid2 = r.j.id;
+  r = await call('PUT', '/bucks/' + ka, { name: 'Known Age', known_age: '4.5', kill_zip: '75701', location: 'Smith Co' }, AD); ok('known age saves', r.s === 200, r);
+  r = await call('GET', '/bucks/' + ka, null, AD); ok('known age, kill ZIP and location persist', r.j.known_age === '4.5' && r.j.kill_zip === '75701' && r.j.location === 'Smith Co', r.j);
+  const ta = (await db.query('select truth_age from scans where id=$1', [sid2])).rows[0].truth_age; ok('known age becomes the graded truth for calibration', ta === '4.5', ta);
+  await call('PUT', '/bucks/' + ka, { name: 'Known Age' }, AD); const tb = (await db.query('select truth_age from scans where id=$1', [sid2])).rows[0].truth_age; ok('clearing it removes the truth', tb === null, tb);
+  await call('PUT', '/bucks/' + ka, { name: 'Known Age', known_age: '9' }, AD); r = await call('GET', '/bucks/' + ka, null, AD); ok('invalid age ignored', r.j.known_age === null, r.j.known_age); await db.query('delete from bucks where id=$1', [ka]); }
 // ---- SEO
 { const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
   let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));
