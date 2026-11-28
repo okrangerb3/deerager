@@ -97,3 +97,6 @@ Each deer has an optional "ZIP where he was killed"; its region sets the wear cu
 
 ### Antler score as evidence
 If a deer has a known Boone & Crockett net score (the optional "Known score" field, else the net from the B&C score sheet), it gently shifts the age odds toward ages that usually carry that much antler (weight 0.5, never decisive). The report says so. Without a score nothing changes, and adding one re-scores that deer's reports.
+
+### Learning from graded deer
+Deer with a known age (the "Age you believe he is" field, an admin grade, or a biologist age) feed Admin > Calibration. Each deer counts once (its latest jaw reading). For every region set to Auto, once 3 worn-tooth deer are graded, the shift becomes the average gap between the true age and the AI's own wear reading before any curve (rounded to 0.25), and all saved reports are re-scored. Saving a region by hand switches it to Manual; "Learn from graded deer" switches it back. A global switch turns learning off. The tab also lists every graded deer and the average antler score by true age.

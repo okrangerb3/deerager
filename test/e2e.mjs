@@ -420,6 +420,17 @@ r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all start
   const ta = (await db.query('select truth_age from scans where id=$1', [sid2])).rows[0].truth_age; ok('known age becomes the graded truth for calibration', ta === '4.5', ta);
   await call('PUT', '/bucks/' + ka, { name: 'Known Age' }, AD); const tb = (await db.query('select truth_age from scans where id=$1', [sid2])).rows[0].truth_age; ok('clearing it removes the truth', tb === null, tb);
   await call('PUT', '/bucks/' + ka, { name: 'Known Age', known_age: '9' }, AD); r = await call('GET', '/bucks/' + ka, null, AD); ok('invalid age ignored', r.j.known_age === null, r.j.known_age); await db.query('delete from bucks where id=$1', [ka]); }
+// ---- learning from graded deer
+{ await db.query("update regions set shift=0,auto=true,note='x' where id='east_tx_pineywoods'"); const ids = [];
+  for (let i = 0; i < 3; i++) { r = await call('POST', '/bucks', { name: 'Learn ' + i, kill_zip: '75701' }, AD); const bid = r.j.id; ids.push(bid); await call('POST', '/scans', scanForm('jaw', bid), AD); }
+  const raw = (await db.query("select observations->'dist'->>'raw_best' b from scans where buck_id=$1 order by created_at desc limit 1", [ids[0]])).rows[0].b;
+  for (const bid of ids) await call('PUT', '/bucks/' + bid, { name: 'x' + bid.slice(0, 4), kill_zip: '75701', known_age: '6.5+' }, AD);
+  await new Promise(r => setTimeout(r, 1500)); const rg = (await db.query("select shift::float sh,note from regions where id='east_tx_pineywoods'")).rows[0];
+  ok('region curve learned from 3 graded deer', rg.sh > 0 && /Learned from 3 graded deer/.test(rg.note), [raw, rg]);
+  r = await call('GET', '/admin/calibration', null, AD); ok('calibration lists the graded deer', r.j.graded.length >= 3 && r.j.graded.filter(x => x.truth === '6.5+').length >= 3 && r.j.auto === true, r.j.graded);
+  await call('PUT', '/admin/regions/east_tx_pineywoods', { name: 'East Texas Pineywoods', zip_prefixes: '755,756,757,758,759,773', shift: 1 }, AD); await call('PUT', '/bucks/' + ids[0], { name: 'x', kill_zip: '75701', known_age: '6.5+' }, AD); await new Promise(r => setTimeout(r, 1000));
+  const rg2 = (await db.query("select shift::float sh,auto from regions where id='east_tx_pineywoods'")).rows[0]; ok('a manual shift stops auto-learning for that region', rg2.sh === 1 && rg2.auto === false, rg2);
+  await db.query("update regions set shift=1,auto=true where id='east_tx_pineywoods'"); for (const id of ids) await db.query('delete from bucks where id=$1', [id]); }
 // ---- SEO
 { const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
   let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));
