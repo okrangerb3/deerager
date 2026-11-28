@@ -405,6 +405,9 @@ r = await call('POST', '/admin/rerun-all', null, AD); ok('admin re-run all start
   r = await call('GET', `/bucks/${sb}/sheet`, null, AD); ok('score sheet view has the numbers', r.s === 200 && r.j.bc && r.j.bc.r[0] === 24, r.j.bc);
   f = new FormData(); f.append('photos', jpg(), 's.jpg'); r = await call('POST', '/bc/read-sheet', f, AD); ok('works without a deer (fills the calculator)', r.s === 200 && r.j.net === 146.5, r.j);
   await db.query('delete from bucks where id=$1', [sb]); }
+// ---- the real TBGA sheet (Deer #4): our math matches the hand-written gross
+{ r = await call('POST', '/bc', { l: [19.25, 4.75, 8.125, 4.875, 0, 0, 4, 3.375, 3, 2.125, 0, 0], r: [18.125, 2.375, 8, 4.875, 0, 0, 4, 3.25, 3, 2, 0, 0], spread: 14.375, abnormal: 0 }, AD);
+  ok('sheet math: columns 45 5/8 and 49 4/8, gross 109 4/8, net 105 5/8', r.s === 200 && r.j.gross === 109.5 && r.j.net === 105.625, r.j); }
 // ---- SEO
 { const txt = async p => { const x = await fetch(BASE + p); return { s: x.status, t: await x.text(), h: x.headers }; };
   let x = await txt('/'); ok('home has title, description, canonical, OG image and JSON-LD', x.s === 200 && /<title>Deer Ager: Age a Deer/.test(x.t) && /name="description"/.test(x.t) && /rel="canonical"/.test(x.t) && /og:image/.test(x.t) && /application\/ld\+json/.test(x.t) && /SoftwareApplication/.test(x.t) && /FAQPage/.test(x.t));
